@@ -2,8 +2,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-mkdir -p dist
-appdir="$(mktemp -d)"
+dist="$PWD/dist"
+mkdir -p "$dist"
+appdir="$(mktemp -d "$dist/.appimage.XXXXXX")"
 trap 'rm -rf "$appdir"' EXIT
 
 tool_url=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
@@ -29,7 +30,7 @@ ln -s usr/bin/tenka "$appdir/Tenka.AppDir/AppRun"
 asset=Tenka-x86_64.AppImage
 update="gh-releases-zsync|yrmuq|tenka|latest|$asset.zsync"
 export ARCH=x86_64
-cd dist
+cd "$appdir"
 "$appdir/appimagetool" --appimage-extract-and-run --runtime-file "$appdir/runtime" \
     -u "$update" "$appdir/Tenka.AppDir" "$asset"
 
@@ -40,3 +41,4 @@ grep -aqxF "Length: $(stat --format=%s "$asset")" "$asset.zsync"
 grep -aqxF "SHA-1: $(sha1sum "$asset" | cut -d' ' -f1)" "$asset.zsync"
 sha256sum "$asset" "$asset.zsync" > SHA256SUMS
 sha256sum --check SHA256SUMS
+mv -- "$asset" "$asset.zsync" SHA256SUMS "$dist/"

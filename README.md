@@ -14,6 +14,8 @@
 
 Tenka is a Linux image optimizer. Its Rust engine selects JPEG XL compression and can resize each image to meet a file-size target. The engine is a separate Rust library for reuse in desktop apps and container workloads.
 
+![Tenka's automatic JPEG XL conversion tab](docs/tenka.jpg)
+
 ---
 
 ## Features

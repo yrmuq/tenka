@@ -137,7 +137,10 @@ impl Tenka {
 
     fn header(&mut self, context: &Context) {
         egui::TopBottomPanel::top("navigation")
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 11)))
+            .frame(
+                egui::Frame::side_top_panel(&context.style())
+                    .inner_margin(egui::Margin::symmetric(20, 11)),
+            )
             .show(context, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
