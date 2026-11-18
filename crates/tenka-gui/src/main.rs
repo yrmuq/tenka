@@ -12,9 +12,10 @@ use eframe::egui::{
 };
 use jobs::{Conversion, Event, Failure, TestResult};
 use language::{Catalog, LANGUAGES};
-use tenka_core::{DEFAULT_QUALITY, Options, OutputFormat, Setting};
+use tenka_core::{Options, OutputFormat, Setting};
 
 const MAX_TEST_QUALITIES: usize = 11;
+const INITIAL_TEST_QUALITY: u8 = 100;
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -121,8 +122,11 @@ impl Tenka {
             folder: None,
             conversion: Options::default(),
             test_file: None,
-            test_qualities: vec![DEFAULT_QUALITY],
-            test_options: Options::default(),
+            test_qualities: vec![INITIAL_TEST_QUALITY],
+            test_options: Options {
+                auto_resize: true,
+                ..Options::default()
+            },
             test_folder: None,
             test_rows: Vec::new(),
             original: None,
@@ -415,8 +419,8 @@ impl Tenka {
                                 .test_qualities
                                 .last()
                                 .copied()
-                                .unwrap_or(DEFAULT_QUALITY);
-                            self.test_qualities.push(next.saturating_sub(5).max(1));
+                                .unwrap_or(INITIAL_TEST_QUALITY);
+                            self.test_qualities.push(next.saturating_sub(2).max(1));
                             changed = true;
                         }
                         if ui

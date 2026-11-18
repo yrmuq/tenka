@@ -35,9 +35,9 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | --- | --- |
 | Drop files or select **Add images** | Add source images to the conversion queue. |
 | **Output format** | Choose JPEG XL or WebP. |
-| Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. |
+| Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. Enabled by default in **Tests**. |
 | Select **Convert pending** | Save files in the selected format beside their originals or in the chosen folder. Existing files are kept. |
-| Set **Quality, %** in **Tests** and select **+** | Add up to ten extra thresholds from 1 to 100. At 100, Tenka encodes losslessly at the original resolution. |
+| Set **Quality, %** in **Tests** and select **+** | Start at 100% and add up to ten extra thresholds, each two points below the previous one, with a minimum of 1%. At 100%, Tenka encodes losslessly at the original resolution. |
 | Select **Run tests and save** in **Tests** | Save one result per threshold in the selected format, next to the source or in the chosen folder. The file name includes the threshold, such as `photo-90.webp`. |
 | Select a test result | Display it beside the source preview. |
 
