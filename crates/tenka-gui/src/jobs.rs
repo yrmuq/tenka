@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use eframe::egui::{ColorImage, Context};
+use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
 use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, Setting, Source};
 
 pub enum Event {
@@ -36,6 +36,11 @@ pub struct TestResult {
     pub quality: f64,
     pub milliseconds: f64,
     pub preview: ColorImage,
+}
+
+pub struct ComparisonPixels {
+    pub dimensions: [usize; 2],
+    pub tiles: Vec<(Rect, ColorImage)>,
 }
 
 #[derive(Debug)]
@@ -121,6 +126,60 @@ pub fn test_qualities(
             ));
         }
     })
+}
+
+pub fn load_comparison(
+    context: &Context,
+    file: PathBuf,
+    texture_limit: usize,
+) -> Receiver<Result<ComparisonPixels, Failure>> {
+    let context = context.clone();
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = read_image(&file)
+            .and_then(|bytes| tenka_core::decode_for_comparison(&bytes).map_err(Failure::from))
+            .map(|image| {
+                let width = image.width() as usize;
+                let height = image.height() as usize;
+                let pixels = image.as_raw();
+                let mut tiles = Vec::new();
+                for top in (0..height).step_by(texture_limit) {
+                    let bottom = (top + texture_limit).min(height);
+                    for left in (0..width).step_by(texture_limit) {
+                        let right = (left + texture_limit).min(width);
+                        let bounds = Rect::from_min_max(
+                            pos2(left as f32 / width as f32, top as f32 / height as f32),
+                            pos2(right as f32 / width as f32, bottom as f32 / height as f32),
+                        );
+                        let size = [right - left, bottom - top];
+                        let tile = if left == 0 && right == width {
+                            ColorImage::from_rgba_unmultiplied(
+                                size,
+                                &pixels[top * width * 4..bottom * width * 4],
+                            )
+                        } else {
+                            let colors = pixels
+                                .chunks_exact(width * 4)
+                                .skip(top)
+                                .take(size[1])
+                                .flat_map(|row| row[left * 4..right * 4].as_chunks::<4>().0)
+                                .map(|&[r, g, b, a]| Color32::from_rgba_unmultiplied(r, g, b, a))
+                                .collect();
+                            ColorImage::new(size, colors)
+                        };
+                        tiles.push((bounds, tile));
+                    }
+                }
+                ComparisonPixels {
+                    dimensions: [width, height],
+                    tiles,
+                }
+            });
+        if send.send(result).is_ok() {
+            context.request_repaint();
+        }
+    });
+    receive
 }
 
 fn test_one(

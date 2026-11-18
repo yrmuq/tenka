@@ -10,3 +10,8 @@
 - Judge compression and resizing against the same original at a common scale so that the search accounts for detail lost during resizing.
 - Run the same automatic conversion search in the Tests tab so its comparisons reflect what the conversion engine can produce at the selected quality.
 - Name each saved test result with its requested quality as the final part of the file stem, including when resolving name collisions.
+- Keep the comparison window's zoom and pan tied to the same relative image coordinates at every rendered resolution.
+
+## Compatibility Workarounds
+
+- Use XWayland for the independent comparison window when X11 is available because Winit 0.30 does not deliver Wayland file drops. Remove the fallback when Winit supports native Wayland file drops.

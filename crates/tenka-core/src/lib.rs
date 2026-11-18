@@ -1,10 +1,11 @@
 //! Still-image conversion and codec measurements without filesystem or GUI dependencies.
 
+mod jxl_header;
 mod raster;
 
 use std::time::{Duration, Instant};
 
-use image::{ImageFormat, RgbaImage};
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use jpegxl_rs::{
     ThreadsRunner,
     decode::PixelFormat,
@@ -171,7 +172,7 @@ impl Setting {
 
     fn decode(self, bytes: &[u8], runner: &Option<ThreadsRunner<'_>>) -> Result<RgbaImage> {
         match self.format() {
-            OutputFormat::JpegXl => decode_jxl(bytes, runner),
+            OutputFormat::JpegXl => decode_jxl(bytes, runner, false),
             OutputFormat::Webp => image::load_from_memory_with_format(bytes, ImageFormat::WebP)
                 .map(|image| image.into_rgba8())
                 .map_err(Error::WebpCandidateDecode),
@@ -199,6 +200,19 @@ pub struct Measurement {
     pub encode_time: Duration,
     pub alpha_exact: bool,
     pub preview: RgbaImage,
+}
+
+/// Decode a still image for display, including JPEG XL results.
+pub fn decode_for_comparison(bytes: &[u8]) -> Result<RgbaImage> {
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(Error::Limits);
+    }
+    if jpegxl_rs::utils::check_valid_signature(bytes) == Some(true) {
+        let needs_color_conversion = jxl_header::needs_color_conversion(bytes)?;
+        decode_jxl(bytes, &parallel_runner(), needs_color_conversion)
+    } else {
+        raster::decode(bytes)
+    }
 }
 
 pub struct Source(RgbaImage);
@@ -402,15 +416,25 @@ fn encode_webp(image: &RgbaImage, quality: Option<f32>) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-fn decode_jxl(bytes: &[u8], runner: &Option<ThreadsRunner<'_>>) -> Result<RgbaImage> {
+fn decode_jxl(
+    bytes: &[u8],
+    runner: &Option<ThreadsRunner<'_>>,
+    normalize_profile: bool,
+) -> Result<RgbaImage> {
     let builder = decoder_builder()
         .pixel_format(PixelFormat {
             num_channels: 4,
             ..Default::default()
         })
+        .icc_profile(normalize_profile)
         .maybe_parallel_runner(runner.as_ref().map(|runner| runner as &dyn ParallelRunner));
     let (metadata, pixels) = builder.build()?.decode_with::<u8>(bytes)?;
-    RgbaImage::from_raw(metadata.width, metadata.height, pixels).ok_or(Error::JxlPixels)
+    let decoded =
+        RgbaImage::from_raw(metadata.width, metadata.height, pixels).ok_or(Error::JxlPixels)?;
+    match metadata.icc_profile {
+        Some(icc) => raster::to_srgb(DynamicImage::ImageRgba8(decoded), &icc),
+        None => Ok(decoded),
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +456,16 @@ mod tests {
             assert_eq!(measured.quality, Some(100.0));
             assert_eq!(measured.preview, source.0);
         }
+    }
+
+    #[test]
+    fn comparison_decodes_lossless_jpeg_xl_results_at_their_original_resolution() {
+        let source = sample();
+        let encoded = Setting::JxlLossless.encode(&source.0, &None).unwrap();
+        assert!(matches!(Source::decode(&encoded), Err(Error::Format)));
+        let decoded = decode_for_comparison(&encoded).unwrap();
+        assert_eq!(decoded.dimensions(), source.dimensions());
+        assert!(decoded.as_raw() == source.0.as_raw());
     }
 
     #[test]

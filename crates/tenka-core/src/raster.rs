@@ -43,9 +43,7 @@ fn limits() -> Limits {
 fn decode_still(mut decoder: impl ImageDecoder) -> Result<RgbaImage> {
     decoder.set_limits(limits())?;
     let (width, height) = decoder.dimensions();
-    if width.max(height) > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
-        return Err(Error::Limits);
-    }
+    check_dimensions(width, height)?;
     let color = decoder.color_type();
     if color.bits_per_pixel() / u16::from(color.channel_count()) != 8 {
         return Err(Error::BitDepth);
@@ -60,7 +58,14 @@ fn decode_still(mut decoder: impl ImageDecoder) -> Result<RgbaImage> {
     }
 }
 
-fn to_srgb(image: DynamicImage, icc: &[u8]) -> Result<RgbaImage> {
+pub fn check_dimensions(width: u32, height: u32) -> Result<()> {
+    if width.max(height) > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(Error::Limits);
+    }
+    Ok(())
+}
+
+pub fn to_srgb(image: DynamicImage, icc: &[u8]) -> Result<RgbaImage> {
     let source = ColorProfile::new_from_slice(icc).map_err(|_| Error::Color)?;
     let target = ColorProfile::new_srgb();
     let (layout, width, height, data) = match source.color_space {

@@ -1,9 +1,12 @@
+mod comparison;
 mod jobs;
 mod language;
 
 use std::{
     path::{Path, PathBuf},
+    process::{Child, Command},
     sync::mpsc::{Receiver, TryRecvError},
+    time::Duration,
 };
 
 use eframe::egui::{
@@ -22,6 +25,12 @@ fn main() -> eframe::Result {
         "../../../packaging/io.github.yrmuq.tenka.png"
     ))
     .expect("the embedded Tenka icon is valid PNG");
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--compare") {
+        let language = args.next().unwrap_or_else(|| "system".into());
+        let theme = parse_theme(args.next().as_deref());
+        return comparison::run(icon, &language, theme);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka")
@@ -77,6 +86,8 @@ struct Tenka {
     test_failure: Option<Failure>,
     folder_failure: Option<Failure>,
     worker: Option<Receiver<Event>>,
+    comparison_windows: Vec<Child>,
+    comparison_failure: Option<Failure>,
 }
 
 impl Tenka {
@@ -85,11 +96,7 @@ impl Tenka {
         let language = read("language")
             .filter(|value| LANGUAGES.contains(&value.as_str()))
             .unwrap_or_else(|| "system".into());
-        let theme = match read("theme").as_deref() {
-            Some("light") => ThemePreference::Light,
-            Some("dark") => ThemePreference::Dark,
-            _ => ThemePreference::System,
-        };
+        let theme = parse_theme(read("theme").as_deref());
         context.egui_ctx.set_theme(theme);
         for appearance in [egui::Theme::Light, egui::Theme::Dark] {
             context.egui_ctx.style_mut_of(appearance, |style| {
@@ -134,6 +141,8 @@ impl Tenka {
             test_failure: None,
             folder_failure: None,
             worker: None,
+            comparison_windows: Vec::new(),
+            comparison_failure: None,
         }
     }
 
@@ -492,6 +501,12 @@ impl Tenka {
                 ));
             }
         });
+        if ui.button(self.label(99)).clicked() {
+            self.open_comparison();
+        }
+        if let Some(error) = &self.comparison_failure {
+            self.show_error(ui, error);
+        }
         if let Some(file) = &self.test_file {
             ui.strong(file_name(file)).on_hover_text(path_label(file));
         } else {
@@ -675,6 +690,46 @@ impl Tenka {
         }
     }
 
+    fn open_comparison(&mut self) {
+        self.comparison_failure = None;
+        let child = std::env::current_exe().and_then(|executable| {
+            let mut command = Command::new(executable);
+            command.args(["--compare", &self.language, theme_name(self.theme)]);
+            // Winit only delivers file drops on X11. Use XWayland for this window when available.
+            if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
+                command
+                    .env_remove("WAYLAND_DISPLAY")
+                    .env_remove("WAYLAND_SOCKET");
+            }
+            command.spawn()
+        });
+        match child {
+            Ok(child) => self.comparison_windows.push(child),
+            Err(error) => {
+                self.comparison_failure = Some(Failure {
+                    label: 101,
+                    detail: error.to_string(),
+                });
+            }
+        }
+    }
+
+    fn poll_comparison_windows(&mut self, context: &Context) {
+        self.comparison_windows.retain_mut(|child| {
+            let (label, detail) = match child.try_wait() {
+                Ok(None) => return true,
+                Ok(Some(status)) if status.success() => return false,
+                Ok(Some(status)) => (102, status.to_string()),
+                Err(error) => (103, error.to_string()),
+            };
+            self.comparison_failure = Some(Failure { label, detail });
+            false
+        });
+        if !self.comparison_windows.is_empty() {
+            context.request_repaint_after(Duration::from_secs(1));
+        }
+    }
+
     fn show_error(&self, ui: &mut Ui, error: &Failure) {
         ui.colored_label(
             ui.visuals().error_fg_color,
@@ -715,16 +770,28 @@ impl eframe::App for Tenka {
                 Tab::Convert => self.show_convert(ui),
                 Tab::Tests => self.show_tests(ui),
             });
+        self.poll_comparison_windows(context);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("language", self.language.clone());
-        let theme = match self.theme {
-            ThemePreference::System => "system",
-            ThemePreference::Light => "light",
-            ThemePreference::Dark => "dark",
-        };
-        storage.set_string("theme", theme.into());
+        storage.set_string("theme", theme_name(self.theme).into());
+    }
+}
+
+fn parse_theme(name: Option<&str>) -> ThemePreference {
+    match name {
+        Some("light") => ThemePreference::Light,
+        Some("dark") => ThemePreference::Dark,
+        _ => ThemePreference::System,
+    }
+}
+
+fn theme_name(theme: ThemePreference) -> &'static str {
+    match theme {
+        ThemePreference::System => "system",
+        ThemePreference::Light => "light",
+        ThemePreference::Dark => "dark",
     }
 }
 

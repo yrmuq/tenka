@@ -2918,6 +2918,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "jpegxl-rs",
+ "jpegxl-sys",
  "moxcms",
  "ssimulacra2",
  "thiserror 2.0.21",

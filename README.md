@@ -40,6 +40,7 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | Set **Quality, %** in **Tests** and select **+** | Start at 100% and add up to ten extra thresholds, each two points below the previous one, with a minimum of 1%. At 100%, Tenka encodes losslessly at the original resolution. |
 | Select **Run tests and save** in **Tests** | Save one result per threshold in the selected format, next to the source or in the chosen folder. The file name includes the threshold, such as `photo-90.webp`. |
 | Select a test result | Display it beside the source preview. |
+| Select **Compare images** in **Tests** | Open a window for comparing JPEG, PNG, WebP, or JPEG XL. Drop files into the window or select **Add images**. Scroll over a panel to zoom at the pointer, and drag with the left mouse button to pan all images together. |
 
 Tenka compares each result with the original at the same scale and checks local pixel differences to catch loss of fine detail. For large images, it estimates quality from a full-frame preview and several native-scale crops.
 

@@ -1,0 +1,339 @@
+use std::{
+    path::PathBuf,
+    sync::mpsc::{Receiver, TryRecvError},
+};
+
+use eframe::egui::{
+    self, Align2, Color32, Context, FontId, IconData, PointerButton, Pos2, Rect, Sense,
+    TextureFilter, TextureHandle, TextureOptions, ThemePreference, Ui, Vec2, pos2, vec2,
+};
+
+use crate::{
+    file_name,
+    jobs::{self, ComparisonPixels, Failure},
+    language::Catalog,
+};
+
+pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Result {
+    let catalog = Catalog::new(language);
+    let title = format!("Tenka — {}", catalog.text(99));
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_app_id("io.github.yrmuq.tenka.compare")
+            .with_icon(icon)
+            .with_inner_size([1000.0, 680.0])
+            .with_min_inner_size([320.0, 240.0]),
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(
+        &title,
+        options,
+        Box::new(move |creation| {
+            creation.egui_ctx.set_theme(theme);
+            Ok(Box::new(Comparison {
+                catalog,
+                images: Vec::new(),
+                next: 0,
+                loading: None,
+                camera: Camera::default(),
+            }))
+        }),
+    )
+}
+
+struct Comparison {
+    catalog: Catalog,
+    images: Vec<Entry>,
+    next: usize,
+    loading: Option<Receiver<Result<ComparisonPixels, Failure>>>,
+    camera: Camera,
+}
+
+struct Entry {
+    path: PathBuf,
+    view: EntryView,
+}
+
+enum EntryView {
+    Pending,
+    Image {
+        size: Vec2,
+        tiles: Vec<(Rect, TextureHandle)>,
+    },
+    Failed(Failure),
+}
+
+impl Comparison {
+    fn add(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.images.extend(paths.into_iter().map(|path| Entry {
+            path,
+            view: EntryView::Pending,
+        }));
+    }
+
+    fn load_images(&mut self, context: &Context) {
+        if let Some(receiver) = &self.loading {
+            let entry = &mut self.images[self.next];
+            entry.view = match receiver.try_recv() {
+                Ok(Ok(image)) => {
+                    let [width, height] = image.dimensions;
+                    let tiles = image
+                        .tiles
+                        .into_iter()
+                        .map(|(bounds, pixels)| {
+                            let texture = context.load_texture(
+                                file_name(&entry.path),
+                                pixels,
+                                TextureOptions {
+                                    magnification: TextureFilter::Nearest,
+                                    ..TextureOptions::LINEAR
+                                },
+                            );
+                            (bounds, texture)
+                        })
+                        .collect();
+                    EntryView::Image {
+                        size: vec2(width as f32, height as f32),
+                        tiles,
+                    }
+                }
+                Ok(Err(error)) => EntryView::Failed(error),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => EntryView::Failed(Failure {
+                    label: 61,
+                    detail: String::new(),
+                }),
+            };
+            self.next += 1;
+            self.loading = None;
+        }
+        if let Some(entry) = self.images.get(self.next) {
+            let max_texture_side = context.input(|input| input.max_texture_side).max(1);
+            self.loading = Some(jobs::load_comparison(
+                context,
+                entry.path.clone(),
+                max_texture_side,
+            ));
+        }
+    }
+
+    fn show_images(&mut self, ui: &mut Ui) {
+        let area = ui.max_rect();
+        if self.images.is_empty() {
+            ui.painter().text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                self.catalog.text(100),
+                FontId::proportional(15.0),
+                ui.visuals().weak_text_color(),
+            );
+            return;
+        }
+
+        let cells = cells(area, self.images.len());
+        for (index, (entry, cell)) in self.images.iter().zip(&cells).enumerate() {
+            let EntryView::Image { size, .. } = &entry.view else {
+                continue;
+            };
+            let image_area = image_area(*cell);
+            let response = ui.interact(image_area, ui.id().with(index), Sense::drag());
+            let fitted = fit(*size, image_area.size());
+            if response.dragged_by(PointerButton::Primary) {
+                self.camera.pan(response.drag_delta(), fitted);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if let Some(pointer) = response.hover_pos() {
+                let scroll = ui.input_mut(|input| std::mem::take(&mut input.raw_scroll_delta.y));
+                if scroll != 0.0 {
+                    self.camera
+                        .zoom_at(scroll, pointer - image_area.center(), fitted);
+                }
+            }
+        }
+
+        for (index, (entry, cell)) in self.images.iter().zip(cells).enumerate() {
+            let image_area = image_area(cell);
+            let painter = ui.painter().with_clip_rect(image_area);
+            painter.rect_filled(image_area, 0, ui.visuals().extreme_bg_color);
+            match &entry.view {
+                EntryView::Image { size, tiles } => {
+                    let image = self.camera.image_rect(image_area, *size);
+                    for (bounds, texture) in tiles {
+                        let tile = Rect::from_min_max(
+                            image.lerp_inside(bounds.min.to_vec2()),
+                            image.lerp_inside(bounds.max.to_vec2()),
+                        );
+                        if tile.intersects(image_area) {
+                            painter.image(
+                                texture.id(),
+                                tile,
+                                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                }
+                EntryView::Pending => {
+                    egui::Spinner::new().paint_at(
+                        ui,
+                        Rect::from_center_size(image_area.center(), Vec2::splat(18.0)),
+                    );
+                }
+                EntryView::Failed(error) => {
+                    painter.text(
+                        image_area.center(),
+                        Align2::CENTER_CENTER,
+                        format!("[E{}] {}", error.label, self.catalog.text(error.label)),
+                        FontId::proportional(14.0),
+                        ui.visuals().error_fg_color,
+                    );
+                    ui.interact(image_area, ui.id().with(index), Sense::hover())
+                        .on_hover_text(&error.detail);
+                }
+            }
+            let caption = Rect::from_min_max(pos2(cell.min.x, image_area.max.y), cell.max);
+            ui.painter().with_clip_rect(caption).text(
+                pos2(caption.min.x + 6.0, caption.center().y),
+                Align2::LEFT_CENTER,
+                file_name(&entry.path),
+                FontId::proportional(13.0),
+                ui.visuals().text_color(),
+            );
+        }
+    }
+}
+
+impl eframe::App for Comparison {
+    fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
+        let drops = context.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        self.add(drops.into_iter().filter_map(|file| file.path));
+        egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
+            if ui.button(self.catalog.text(8)).clicked()
+                && let Some(files) = rfd::FileDialog::new()
+                    .add_filter(
+                        "JPEG / PNG / WebP / JPEG XL",
+                        &["jpg", "jpeg", "png", "webp", "jxl"],
+                    )
+                    .pick_files()
+            {
+                self.add(files);
+            }
+        });
+        self.load_images(context);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&context.style()).inner_margin(0))
+            .show(context, |ui| self.show_images(ui));
+    }
+}
+
+fn cells(area: Rect, count: usize) -> Vec<Rect> {
+    let columns = count.div_ceil(count.isqrt());
+    let rows = count.div_ceil(columns);
+    let height = area.height() / rows as f32;
+    let mut cells = Vec::with_capacity(count);
+    for row in 0..rows {
+        let count_in_row = count / rows + usize::from(row < count % rows);
+        let width = area.width() / count_in_row as f32;
+        for column in 0..count_in_row {
+            let top_left = area.min + vec2(column as f32 * width, row as f32 * height);
+            cells.push(Rect::from_min_size(top_left, vec2(width, height)).shrink(1.0));
+        }
+    }
+    cells
+}
+
+fn image_area(cell: Rect) -> Rect {
+    let mut image = cell;
+    image.max.y -= (cell.height() / 3.0).min(22.0);
+    image
+}
+
+fn fit(image: Vec2, area: Vec2) -> Vec2 {
+    image * (area.x / image.x).min(area.y / image.y)
+}
+
+struct Camera {
+    center: Vec2,
+    zoom: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            center: Vec2::splat(0.5),
+            zoom: 1.0,
+        }
+    }
+}
+
+impl Camera {
+    fn image_rect(&self, area: Rect, size: Vec2) -> Rect {
+        let span = fit(size, area.size()) * self.zoom;
+        Rect::from_min_size(area.center() - self.center * span, span)
+    }
+
+    fn zoom_at(&mut self, scroll: f32, pointer_offset: Vec2, fitted: Vec2) {
+        let factor = (scroll * 0.01).clamp(-1.0, 1.0).exp();
+        let zoom = (self.zoom * factor).clamp(1.0, 1024.0);
+        let anchor = self.center + pointer_offset / (fitted * self.zoom);
+        self.center =
+            (anchor - pointer_offset / (fitted * zoom)).clamp(Vec2::ZERO, Vec2::splat(1.0));
+        self.zoom = zoom;
+    }
+
+    fn pan(&mut self, delta: Vec2, fitted: Vec2) {
+        self.center =
+            (self.center - delta / (fitted * self.zoom)).clamp(Vec2::ZERO, Vec2::splat(1.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_cursor_and_pan_matches_different_resolutions() {
+        let mut camera = Camera::default();
+        let first = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+        let second = first.translate(vec2(400.0, 0.0));
+        let original = vec2(1600.0, 900.0);
+        let resized = vec2(800.0, 450.0);
+        let anchor = vec2(0.7, 0.3);
+        let pointer = camera.image_rect(first, original).lerp_inside(anchor);
+        let other_pointer = camera.image_rect(second, resized).lerp_inside(anchor);
+        let fit = fit(original, first.size());
+
+        camera.zoom_at(40.0, pointer - first.center(), fit);
+        assert!(
+            camera
+                .image_rect(first, original)
+                .lerp_inside(anchor)
+                .distance(pointer)
+                < 0.01
+        );
+        assert!(
+            camera
+                .image_rect(second, resized)
+                .lerp_inside(anchor)
+                .distance(other_pointer)
+                < 0.01
+        );
+        let drag = vec2(-20.0, 10.0);
+        camera.pan(drag, fit);
+        assert!(
+            camera
+                .image_rect(first, original)
+                .lerp_inside(anchor)
+                .distance(pointer + drag)
+                < 0.01
+        );
+        assert!(
+            camera
+                .image_rect(second, resized)
+                .lerp_inside(anchor)
+                .distance(other_pointer + drag)
+                < 0.01
+        );
+    }
+}
