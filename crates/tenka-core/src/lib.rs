@@ -1,6 +1,7 @@
 //! Still-image conversion and codec measurements without filesystem or GUI dependencies.
 
 mod jxl_header;
+mod quality_test;
 mod raster;
 
 use std::time::{Duration, Instant};
@@ -15,6 +16,8 @@ use jpegxl_rs::{
     parallel::ParallelRunner,
 };
 use thiserror::Error;
+
+pub use quality_test::QualityTest;
 
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 36_000_000;
@@ -39,6 +42,8 @@ pub enum Error {
     Options,
     #[error("Quality {0} is outside the allowed range of 1 to 100")]
     QualityRange(u8),
+    #[error("No tested encoding reached a similarity of {0}% or lower")]
+    QualityCeiling(u8),
     #[error("Image decoding failed")]
     Decode(#[source] image::ImageError),
     #[error("JPEG XL encoding failed")]
@@ -237,6 +242,11 @@ impl Source {
         self.convert_with_quality(options, DEFAULT_QUALITY)
     }
 
+    /// Start a comparison series that reuses measurements for this source and format.
+    pub fn quality_test(&self, options: Options) -> QualityTest<'_> {
+        QualityTest::new(&self.0, options)
+    }
+
     /// Optimize for a minimum similarity score from 1 to 100.
     /// A score of 100 preserves the dimensions and encodes the prepared pixels losslessly.
     pub fn convert_with_quality(&self, options: Options, min_quality: u8) -> Result<Output> {
@@ -351,11 +361,7 @@ fn smallest_at(
     }
 
     for &setting in lossy {
-        let bytes = setting.encode(image, runner)?;
-        let decoded = setting.decode(&bytes, runner)?;
-        if decoded.dimensions() != dimensions {
-            return Err(Error::CandidateDimensions);
-        }
+        let (bytes, decoded) = round_trip(image, setting, runner)?;
         if !raster::alpha_equal(image, &decoded) {
             break;
         }
@@ -372,6 +378,19 @@ fn smallest_at(
         }
     }
     Ok(best)
+}
+
+fn round_trip(
+    image: &RgbaImage,
+    setting: Setting,
+    runner: &Option<ThreadsRunner<'_>>,
+) -> Result<(Vec<u8>, RgbaImage)> {
+    let bytes = setting.encode(image, runner)?;
+    let decoded = setting.decode(&bytes, runner)?;
+    if decoded.dimensions() != image.dimensions() {
+        return Err(Error::CandidateDimensions);
+    }
+    Ok((bytes, decoded))
 }
 
 fn parallel_runner() -> Option<ThreadsRunner<'static>> {

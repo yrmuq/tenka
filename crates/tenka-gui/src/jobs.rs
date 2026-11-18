@@ -8,7 +8,7 @@ use std::{
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
-use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, Setting, Source};
+use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, QualityTest, Setting, Source};
 
 pub enum Event {
     Started(usize),
@@ -70,6 +70,7 @@ impl From<tenka_core::Error> for Failure {
             QualitySample => 80,
             CandidateDimensions => 81,
             QualityRange(_) => 86,
+            QualityCeiling(_) => 105,
         };
         Self {
             label,
@@ -119,10 +120,11 @@ pub fn test_qualities(
             thumbnail.as_raw(),
         );
         emit(Event::Original(original, format!("{width} × {height}")));
+        let mut test = source.quality_test(options);
         for quality in qualities {
             emit(Event::Tested(
                 quality,
-                test_one(&source, &file, folder.as_deref(), options, quality),
+                test_one(&mut test, &file, folder.as_deref(), quality),
             ));
         }
     })
@@ -183,21 +185,20 @@ pub fn load_comparison(
 }
 
 fn test_one(
-    source: &Source,
+    test: &mut QualityTest<'_>,
     file: &Path,
     folder: Option<&Path>,
-    options: Options,
-    min_quality: u8,
+    ceiling: u8,
 ) -> Result<TestResult, Failure> {
     let start = Instant::now();
-    let result = source.convert_with_quality(options, min_quality)?;
+    let result = test.encode(ceiling)?;
     let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
     let thumbnail = result.preview()?;
     let path = save_image(
         file,
         folder,
-        options.format,
-        Some(min_quality),
+        result.setting.format(),
+        Some(ceiling),
         &result.bytes,
     )?;
     Ok(TestResult {
@@ -345,19 +346,15 @@ mod tests {
             130,
         ];
         fs::write(&input, png).unwrap();
-        let existing = destination.path().join("image-87.webp");
+        let existing = destination.path().join("image-100.webp");
         fs::write(&existing, b"existing output").unwrap();
 
-        for (format, folder, expected_paths) in [
-            (
-                OutputFormat::JpegXl,
-                None,
-                ["image-87.jxl", "image-100.jxl"],
-            ),
+        for (format, folder, expected_path) in [
+            (OutputFormat::JpegXl, None, "image-100.jxl"),
             (
                 OutputFormat::Webp,
                 Some(destination.path().to_owned()),
-                ["image-1-87.webp", "image-100.webp"],
+                "image-1-100.webp",
             ),
         ] {
             let expected_folder = folder.as_deref().unwrap_or(root.path()).to_owned();
@@ -372,14 +369,20 @@ mod tests {
                 vec![87, 100],
             );
             let mut saved = Vec::new();
+            let mut rejected = false;
             loop {
                 match events
                     .recv_timeout(std::time::Duration::from_secs(10))
                     .unwrap()
                 {
+                    Event::Tested(87, Err(error)) => {
+                        assert_eq!(error.label, 105);
+                        rejected = true;
+                    }
                     Event::Tested(quality, result) => {
                         let result = result.unwrap();
                         assert_eq!(result.setting.format(), format);
+                        assert!(result.setting.is_lossless());
                         assert_eq!(result.path.parent(), Some(expected_folder.as_path()));
                         assert_eq!(
                             fs::metadata(&result.path).unwrap().len(),
@@ -392,12 +395,12 @@ mod tests {
                     _ => panic!("unexpected event during quality batch"),
                 }
             }
-            assert_eq!(
-                saved,
-                vec![
-                    (87, expected_folder.join(expected_paths[0])),
-                    (100, expected_folder.join(expected_paths[1]))
-                ]
+            assert!(rejected);
+            assert_eq!(saved, vec![(100, expected_folder.join(expected_path))]);
+            assert!(
+                !expected_folder
+                    .join(format!("image-87.{}", format.extension()))
+                    .exists()
             );
         }
         assert_eq!(fs::read(existing).unwrap(), b"existing output");

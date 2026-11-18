@@ -37,12 +37,12 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | **Output format** | Choose JPEG XL or WebP. |
 | Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. Enabled by default in **Tests**. |
 | Select **Convert pending** | Save files in the selected format beside their originals or in the chosen folder. Existing files are kept. |
-| Set **Quality, %** in **Tests** and select **+** | Start at 100% and add up to ten extra thresholds, each two points below the previous one, with a minimum of 1%. At 100%, Tenka encodes losslessly at the original resolution. |
-| Select **Run tests and save** in **Tests** | Save one result per threshold in the selected format, next to the source or in the chosen folder. The file name includes the threshold, such as `photo-90.webp`. |
+| Set **Quality, %** in **Tests** and select **+** | Start at 100% and add up to ten extra values, each two points below the previous one, with a minimum of 1%. At 100%, Tenka encodes losslessly at the original resolution. Below 100%, Tenka looks for the closest lossy result at or below the requested score. |
+| Select **Run tests and save** in **Tests** | Save each matching result in the selected format, next to the source or in the chosen folder. The file name includes the requested score, such as `photo-90.webp`. |
 | Select a test result | Display it beside the source preview. |
 | Select **Compare images** in **Tests** | Drop files into the comparison window or select **Add images**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 
-Tenka compares each result with the original at the same scale and checks local pixel differences to catch loss of fine detail. For large images, it estimates quality from a full-frame preview and several native-scale crops.
+Tenka compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 
 </details>
 
