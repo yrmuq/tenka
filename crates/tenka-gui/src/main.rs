@@ -10,9 +10,11 @@ use eframe::egui::{
     self, Button, ColorImage, ComboBox, Context, Grid, RichText, ScrollArea, TextureHandle,
     ThemePreference, Ui, Vec2,
 };
-use jobs::{Comparison, Conversion, Event, Failure};
+use jobs::{Conversion, Event, Failure, TestResult};
 use language::{Catalog, LANGUAGES};
 use tenka_core::{DEFAULT_QUALITY, Options, OutputFormat, Setting};
+
+const MAX_TEST_QUALITIES: usize = 11;
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -52,8 +54,8 @@ struct QueueEntry {
 }
 
 struct TestRow {
-    format: OutputFormat,
-    outcome: Result<Comparison, Failure>,
+    quality: u8,
+    outcome: Result<TestResult, Failure>,
 }
 
 struct Tenka {
@@ -65,8 +67,9 @@ struct Tenka {
     folder: Option<PathBuf>,
     conversion: Options,
     test_file: Option<PathBuf>,
-    test_quality: u8,
-    test_auto_resize: bool,
+    test_qualities: Vec<u8>,
+    test_options: Options,
+    test_folder: Option<PathBuf>,
     test_rows: Vec<TestRow>,
     original: Option<(TextureHandle, String)>,
     preview: Option<(usize, TextureHandle)>,
@@ -118,8 +121,9 @@ impl Tenka {
             folder: None,
             conversion: Options::default(),
             test_file: None,
-            test_quality: DEFAULT_QUALITY,
-            test_auto_resize: false,
+            test_qualities: vec![DEFAULT_QUALITY],
+            test_options: Options::default(),
+            test_folder: None,
             test_rows: Vec::new(),
             original: None,
             preview: None,
@@ -228,43 +232,17 @@ impl Tenka {
                 self.queue.clear();
             }
         });
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!busy, Button::new(self.label(9)))
-                .on_hover_text(self.label(63))
-                .clicked()
-                && let Some(folder) = rfd::FileDialog::new().pick_folder()
-            {
-                self.folder = Some(folder);
-            }
-            if let Some(folder) = &self.folder {
-                ui.label(path_label(folder));
-                if ui.add_enabled(!busy, Button::new(self.label(10))).clicked() {
-                    self.folder = None;
-                }
-            } else {
-                ui.weak(self.label(10));
-            }
-        });
+        folder_picker(ui, &self.catalog, &mut self.folder, busy);
 
         ui.add_space(6.0);
         section(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(self.label(73));
-                    ComboBox::from_id_salt("output_format")
-                        .selected_text(self.conversion.format.name())
-                        .width(164.0)
-                        .show_ui(ui, |ui| {
-                            for format in OutputFormat::ALL {
-                                ui.selectable_value(
-                                    &mut self.conversion.format,
-                                    format,
-                                    format.name(),
-                                );
-                            }
-                        });
-                });
+                format_picker(
+                    ui,
+                    "output_format",
+                    self.label(73),
+                    &mut self.conversion.format,
+                );
                 let resize = self.label(74);
                 ui.checkbox(&mut self.conversion.auto_resize, resize)
                     .on_hover_text(self.label(75));
@@ -411,25 +389,67 @@ impl Tenka {
     }
 
     fn show_tests(&mut self, ui: &mut Ui) {
-        ui.heading(self.label(34));
+        ui.heading(self.label(88));
         let busy = self.worker.is_some();
         section(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                let quality = ui
-                    .horizontal(|ui| {
+                let format_changed = format_picker(
+                    ui,
+                    "test_format",
+                    self.label(73),
+                    &mut self.test_options.format,
+                );
+                let quality_changed = ui
+                    .horizontal_wrapped(|ui| {
                         ui.label(self.label(82));
-                        ui.add(egui::DragValue::new(&mut self.test_quality).range(1_u8..=100))
-                            .on_hover_text(self.label(87))
-                            .changed()
+                        let mut changed = false;
+                        if ui
+                            .add_enabled(
+                                self.test_qualities.len() < MAX_TEST_QUALITIES,
+                                Button::new("+"),
+                            )
+                            .on_hover_text(self.label(91))
+                            .clicked()
+                        {
+                            let next = self
+                                .test_qualities
+                                .last()
+                                .copied()
+                                .unwrap_or(DEFAULT_QUALITY);
+                            self.test_qualities.push(next.saturating_sub(5).max(1));
+                            changed = true;
+                        }
+                        if ui
+                            .add_enabled(self.test_qualities.len() > 1, Button::new("-"))
+                            .on_hover_text(self.label(92))
+                            .clicked()
+                        {
+                            self.test_qualities.pop();
+                            changed = true;
+                        }
+                        let hint = self.label(87);
+                        for (index, quality) in self.test_qualities.iter_mut().enumerate() {
+                            changed |= ui
+                                .push_id(index, |ui| {
+                                    ui.add(egui::DragValue::new(quality).range(1_u8..=100))
+                                        .on_hover_text(hint)
+                                        .changed()
+                                })
+                                .inner;
+                        }
+                        changed
                     })
                     .inner;
                 let resize = self.label(74);
-                let resize = ui.checkbox(&mut self.test_auto_resize, resize).changed();
-                if quality || resize {
+                let resize_changed = ui
+                    .checkbox(&mut self.test_options.auto_resize, resize)
+                    .changed();
+                if format_changed || quality_changed || resize_changed {
                     self.clear_test_results();
                 }
             });
         });
+        folder_picker(ui, &self.catalog, &mut self.test_folder, busy);
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, Button::new(self.label(32))).clicked()
                 && let Some(file) = self.picker().pick_file()
@@ -439,17 +459,18 @@ impl Tenka {
             if ui
                 .add_enabled(
                     !busy && self.test_file.is_some(),
-                    Button::new(self.label(33)),
+                    Button::new(self.label(89)),
                 )
                 .clicked()
                 && let Some(file) = self.test_file.clone()
             {
                 self.clear_test_results();
-                self.worker = Some(jobs::compare(
+                self.worker = Some(jobs::test_qualities(
                     ui.ctx(),
                     file,
-                    self.test_quality,
-                    self.test_auto_resize,
+                    self.test_folder.clone(),
+                    self.test_options,
+                    self.test_qualities.clone(),
                 ));
             }
             if busy
@@ -459,13 +480,18 @@ impl Tenka {
                     .any(|e| matches!(e.status, Status::Running))
             {
                 ui.spinner();
-                ui.label(self.label(62));
+                ui.label(format!(
+                    "{} {}/{}",
+                    self.label(93),
+                    self.test_rows.len(),
+                    self.test_qualities.len()
+                ));
             }
         });
         if let Some(file) = &self.test_file {
             ui.strong(file_name(file)).on_hover_text(path_label(file));
         } else {
-            ui.weak(self.label(35));
+            ui.weak(self.label(90));
         }
         if let Some(error) = &self.test_failure {
             self.show_error(ui, error);
@@ -477,47 +503,61 @@ impl Tenka {
 
         ScrollArea::vertical().show(ui, |ui| {
             let mut selection = None;
-            Grid::new("measurements")
-                .num_columns(6)
-                .striped(true)
-                .spacing([18.0, 5.0])
-                .show(ui, |ui| {
-                    for id in [36, 37, 38, 83, 85, 84] {
-                        ui.strong(self.label(id));
-                    }
-                    ui.end_row();
-                    for (index, row) in self.test_rows.iter().enumerate() {
-                        let codec = row.format.name();
-                        let selected = self.preview.as_ref().is_some_and(|(idx, _)| *idx == index);
-                        match &row.outcome {
-                            Ok(result) => {
-                                if ui.selectable_label(selected, codec).clicked() {
-                                    selection = Some((index, &result.preview));
-                                }
-                                let setting = match result.setting {
-                                    Setting::Jxl(value) => format!("{} {value}", self.label(64)),
-                                    Setting::Webp(value) => format!("{} {value}", self.label(39)),
-                                    Setting::JxlLossless | Setting::WebpLossless => {
-                                        self.label(17).into()
-                                    }
-                                };
-                                ui.label(setting);
-                                ui.label(size(result.bytes));
-                                ui.label(dimensions_text(result.dimensions));
-                                ui.label(format!("{:.1}%", result.quality));
-                                ui.label(format!("{:.0} ms", result.milliseconds));
-                            }
-                            Err(error) => {
-                                ui.label(codec);
-                                self.show_error(ui, error);
-                                for _ in 0..4 {
-                                    ui.weak("—");
-                                }
-                            }
+            ScrollArea::horizontal().show(ui, |ui| {
+                Grid::new("measurements")
+                    .num_columns(6)
+                    .striped(true)
+                    .max_col_width(200.0)
+                    .spacing([14.0, 5.0])
+                    .show(ui, |ui| {
+                        for id in [94, 37, 38, 83, 85, 84] {
+                            ui.strong(self.label(id));
                         }
                         ui.end_row();
-                    }
-                });
+                        for (index, row) in self.test_rows.iter().enumerate() {
+                            let quality = format!("{}%", row.quality);
+                            let selected =
+                                self.preview.as_ref().is_some_and(|(idx, _)| *idx == index);
+                            match &row.outcome {
+                                Ok(result) => {
+                                    ui.vertical(|ui| {
+                                        if ui.selectable_label(selected, &quality).clicked() {
+                                            selection = Some((index, &result.preview));
+                                        }
+                                        ui.add(
+                                            egui::Label::new(file_name(&result.path)).truncate(),
+                                        )
+                                        .on_hover_text(path_label(&result.path));
+                                    });
+                                    let setting = match result.setting {
+                                        Setting::Jxl(value) => {
+                                            format!("{} {value}", self.label(64))
+                                        }
+                                        Setting::Webp(value) => {
+                                            format!("{} {value}", self.label(39))
+                                        }
+                                        Setting::JxlLossless | Setting::WebpLossless => {
+                                            self.label(17).into()
+                                        }
+                                    };
+                                    ui.label(setting);
+                                    ui.label(size(result.bytes));
+                                    ui.label(dimensions_text(result.dimensions));
+                                    ui.label(format!("{:.1}%", result.quality));
+                                    ui.label(format!("{:.0} ms", result.milliseconds));
+                                }
+                                Err(error) => {
+                                    ui.label(quality);
+                                    self.show_error(ui, error);
+                                    for _ in 0..4 {
+                                        ui.weak("—");
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
             if let Some((index, pixels)) = selection {
                 self.preview = Some((index, texture(ui.ctx(), "encoded", pixels.clone())));
             }
@@ -594,7 +634,7 @@ impl Tenka {
                 Ok(Event::Original(pixels, dimensions)) => {
                     self.original = Some((texture(context, "original", pixels), dimensions));
                 }
-                Ok(Event::Measured(format, outcome)) => {
+                Ok(Event::Tested(quality, outcome)) => {
                     if self.preview.is_none()
                         && let Ok(result) = &outcome
                     {
@@ -603,7 +643,7 @@ impl Tenka {
                             texture(context, "encoded", result.preview.clone()),
                         ));
                     }
-                    self.test_rows.push(TestRow { format, outcome });
+                    self.test_rows.push(TestRow { quality, outcome });
                 }
                 Ok(Event::Failed(error)) => self.test_failure = Some(error),
                 Ok(Event::Finished) => self.worker = None,
@@ -690,6 +730,49 @@ fn theme_id(theme: ThemePreference) -> u16 {
         ThemePreference::Light => 6,
         ThemePreference::Dark => 7,
     }
+}
+
+fn folder_picker(ui: &mut Ui, catalog: &Catalog, folder: &mut Option<PathBuf>, busy: bool) {
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!busy, Button::new(catalog.text(9)))
+            .on_hover_text(catalog.text(63))
+            .clicked()
+            && let Some(selected) = rfd::FileDialog::new().pick_folder()
+        {
+            *folder = Some(selected);
+        }
+        if let Some(selected) = folder {
+            if ui
+                .add_enabled(!busy, Button::new(catalog.text(10)))
+                .clicked()
+            {
+                *folder = None;
+            } else {
+                let path = path_label(selected);
+                ui.add(egui::Label::new(&path).truncate())
+                    .on_hover_text(path);
+            }
+        } else {
+            ui.weak(catalog.text(10));
+        }
+    });
+}
+
+fn format_picker(ui: &mut Ui, id: &str, label: &str, format: &mut OutputFormat) -> bool {
+    let previous = *format;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ComboBox::from_id_salt(id)
+            .selected_text(format.name())
+            .width(164.0)
+            .show_ui(ui, |ui| {
+                for option in OutputFormat::ALL {
+                    ui.selectable_value(format, option, option.name());
+                }
+            });
+    });
+    previous != *format
 }
 
 fn section(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {

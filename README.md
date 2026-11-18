@@ -23,7 +23,7 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 - Batch conversion of still, 8-bit JPEG, PNG, and WebP images to JPEG XL or WebP.
 - Automatic compression selection and optional resolution reduction based on similarity to the original.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
-- JPEG XL and WebP comparison at a chosen quality threshold with file size, resolution, similarity, search time, and previews.
+- Batch tests at up to eleven quality thresholds in the selected codec, with saved results and previews.
 - English and Russian interface with system, light, and dark themes.
 
 ---
@@ -37,9 +37,9 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | **Output format** | Choose JPEG XL or WebP. |
 | Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. |
 | Select **Convert pending** | Save files in the selected format beside their originals or in the chosen folder. Existing files are kept. |
-| Set **Quality, %** in **Tests** | Set the minimum similarity score from 1 to 100. At 100, both codecs encode losslessly at the original resolution. |
-| Select **Run comparison** in **Tests** | Compare one automatically optimized result per codec. Enable **Automatically reduce resolution** to try smaller dimensions. |
-| Select a codec result | Display it beside the source preview. |
+| Set **Quality, %** in **Tests** and select **+** | Add up to ten extra thresholds from 1 to 100. At 100, Tenka encodes losslessly at the original resolution. |
+| Select **Run tests and save** in **Tests** | Save one result per threshold in the selected format, next to the source or in the chosen folder. The file name includes the threshold, such as `photo-90.webp`. |
+| Select a test result | Display it beside the source preview. |
 
 Tenka compares each result with the original at the same scale and checks local pixel differences to catch loss of fine detail. For large images, it estimates quality from a full-frame preview and several native-scale crops.
 
