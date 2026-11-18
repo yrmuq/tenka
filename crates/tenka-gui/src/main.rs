@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use jobs::{Comparison, Conversion, Event, Failure};
 use language::{Catalog, LANGUAGES};
-use tenka_core::{Options, OutputFormat, Setting};
+use tenka_core::{DEFAULT_QUALITY, Options, OutputFormat, Setting};
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -52,7 +52,7 @@ struct QueueEntry {
 }
 
 struct TestRow {
-    setting: Setting,
+    format: OutputFormat,
     outcome: Result<Comparison, Failure>,
 }
 
@@ -65,6 +65,8 @@ struct Tenka {
     folder: Option<PathBuf>,
     conversion: Options,
     test_file: Option<PathBuf>,
+    test_quality: u8,
+    test_auto_resize: bool,
     test_rows: Vec<TestRow>,
     original: Option<(TextureHandle, String)>,
     preview: Option<(usize, TextureHandle)>,
@@ -116,6 +118,8 @@ impl Tenka {
             folder: None,
             conversion: Options::default(),
             test_file: None,
+            test_quality: DEFAULT_QUALITY,
+            test_auto_resize: false,
             test_rows: Vec::new(),
             original: None,
             preview: None,
@@ -409,6 +413,23 @@ impl Tenka {
     fn show_tests(&mut self, ui: &mut Ui) {
         ui.heading(self.label(34));
         let busy = self.worker.is_some();
+        section(ui, |ui| {
+            ui.add_enabled_ui(!busy, |ui| {
+                let quality = ui
+                    .horizontal(|ui| {
+                        ui.label(self.label(82));
+                        ui.add(egui::DragValue::new(&mut self.test_quality).range(1_u8..=100))
+                            .on_hover_text(self.label(87))
+                            .changed()
+                    })
+                    .inner;
+                let resize = self.label(74);
+                let resize = ui.checkbox(&mut self.test_auto_resize, resize).changed();
+                if quality || resize {
+                    self.clear_test_results();
+                }
+            });
+        });
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, Button::new(self.label(32))).clicked()
                 && let Some(file) = self.picker().pick_file()
@@ -424,7 +445,12 @@ impl Tenka {
                 && let Some(file) = self.test_file.clone()
             {
                 self.clear_test_results();
-                self.worker = Some(jobs::compare(ui.ctx(), file));
+                self.worker = Some(jobs::compare(
+                    ui.ctx(),
+                    file,
+                    self.test_quality,
+                    self.test_auto_resize,
+                ));
             }
             if busy
                 && !self
@@ -456,42 +482,37 @@ impl Tenka {
                 .striped(true)
                 .spacing([18.0, 5.0])
                 .show(ui, |ui| {
-                    for id in [36, 37, 38, 39, 40, 41] {
+                    for id in [36, 37, 38, 83, 85, 84] {
                         ui.strong(self.label(id));
                     }
                     ui.end_row();
                     for (index, row) in self.test_rows.iter().enumerate() {
-                        let (codec, setting) = match row.setting {
-                            Setting::Jxl(value) => {
-                                ("JPEG XL", format!("{} {value}", self.label(64)))
-                            }
-                            Setting::JxlLossless => ("JPEG XL", self.label(17).into()),
-                            Setting::Webp(value) => ("WebP", format!("{} {value}", self.label(39))),
-                            Setting::WebpLossless => ("WebP", self.label(17).into()),
-                        };
+                        let codec = row.format.name();
                         let selected = self.preview.as_ref().is_some_and(|(idx, _)| *idx == index);
                         match &row.outcome {
                             Ok(result) => {
                                 if ui.selectable_label(selected, codec).clicked() {
                                     selection = Some((index, &result.preview));
                                 }
+                                let setting = match result.setting {
+                                    Setting::Jxl(value) => format!("{} {value}", self.label(64)),
+                                    Setting::Webp(value) => format!("{} {value}", self.label(39)),
+                                    Setting::JxlLossless | Setting::WebpLossless => {
+                                        self.label(17).into()
+                                    }
+                                };
                                 ui.label(setting);
                                 ui.label(size(result.bytes));
-                                ui.label(
-                                    result
-                                        .quality
-                                        .map_or_else(|| "—".into(), |score| format!("{score:.1}")),
-                                );
+                                ui.label(dimensions_text(result.dimensions));
+                                ui.label(format!("{:.1}%", result.quality));
                                 ui.label(format!("{:.0} ms", result.milliseconds));
-                                ui.label(self.label(if result.alpha_exact { 42 } else { 43 }));
                             }
                             Err(error) => {
                                 ui.label(codec);
-                                ui.label(setting);
                                 self.show_error(ui, error);
-                                ui.weak("—");
-                                ui.weak("—");
-                                ui.weak("—");
+                                for _ in 0..4 {
+                                    ui.weak("—");
+                                }
                             }
                         }
                         ui.end_row();
@@ -502,12 +523,33 @@ impl Tenka {
             }
             ui.weak(self.label(47));
             ui.separator();
-            if let (Some((original, dimensions)), Some((_, encoded))) =
+            if let (Some((original, dimensions)), Some((index, encoded))) =
                 (&self.original, &self.preview)
+                && let Ok(result) = &self.test_rows[*index].outcome
             {
                 ui.columns(2, |columns| {
-                    show_preview(&mut columns[0], original, self.label(44), Some(dimensions));
-                    show_preview(&mut columns[1], encoded, self.label(45), None);
+                    let original_size = original.size_vec2();
+                    let width = columns[0]
+                        .available_width()
+                        .min(columns[1].available_width());
+                    let scale = (width / original_size.x)
+                        .min(260.0 / original_size.y)
+                        .min(1.0);
+                    let preview_size = original_size * scale;
+                    show_preview(
+                        &mut columns[0],
+                        original,
+                        self.label(44),
+                        dimensions,
+                        preview_size,
+                    );
+                    show_preview(
+                        &mut columns[1],
+                        encoded,
+                        self.label(45),
+                        &dimensions_text(result.dimensions),
+                        preview_size,
+                    );
                 });
             } else {
                 ui.weak(self.label(46));
@@ -552,7 +594,7 @@ impl Tenka {
                 Ok(Event::Original(pixels, dimensions)) => {
                     self.original = Some((texture(context, "original", pixels), dimensions));
                 }
-                Ok(Event::Measured(setting, outcome)) => {
+                Ok(Event::Measured(format, outcome)) => {
                     if self.preview.is_none()
                         && let Ok(result) = &outcome
                     {
@@ -561,7 +603,7 @@ impl Tenka {
                             texture(context, "encoded", result.preview.clone()),
                         ));
                     }
-                    self.test_rows.push(TestRow { setting, outcome });
+                    self.test_rows.push(TestRow { format, outcome });
                 }
                 Ok(Event::Failed(error)) => self.test_failure = Some(error),
                 Ok(Event::Finished) => self.worker = None,
@@ -682,12 +724,12 @@ fn texture(context: &Context, name: &str, pixels: ColorImage) -> TextureHandle {
     context.load_texture(name, pixels, egui::TextureOptions::LINEAR)
 }
 
-fn show_preview(ui: &mut Ui, texture: &TextureHandle, label: &str, dimensions: Option<&str>) {
+fn dimensions_text((width, height): (u32, u32)) -> String {
+    format!("{width} × {height}")
+}
+
+fn show_preview(ui: &mut Ui, texture: &TextureHandle, label: &str, dimensions: &str, size: Vec2) {
     ui.strong(label);
-    if let Some(dimensions) = dimensions {
-        ui.weak(dimensions);
-    } else {
-        ui.weak(" ");
-    }
-    ui.add(egui::Image::new(texture).max_size(Vec2::new(ui.available_width(), 260.0)));
+    ui.weak(dimensions);
+    ui.add(egui::Image::new(texture).fit_to_exact_size(size));
 }

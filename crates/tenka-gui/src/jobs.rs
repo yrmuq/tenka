@@ -4,16 +4,17 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
+    time::Instant,
 };
 
 use eframe::egui::{ColorImage, Context};
-use tenka_core::{BENCHMARK_SETTINGS, MAX_INPUT_BYTES, Options, OutputFormat, Setting, Source};
+use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, Setting, Source};
 
 pub enum Event {
     Started(usize),
     Converted(usize, Result<Conversion, Failure>),
     Original(ColorImage, String),
-    Measured(Setting, Result<Comparison, Failure>),
+    Measured(OutputFormat, Result<Comparison, Failure>),
     Failed(Failure),
     Finished,
 }
@@ -28,10 +29,11 @@ pub struct Conversion {
 }
 
 pub struct Comparison {
+    pub setting: Setting,
     pub bytes: usize,
-    pub quality: Option<f64>,
+    pub dimensions: (u32, u32),
+    pub quality: f64,
     pub milliseconds: f64,
-    pub alpha_exact: bool,
     pub preview: ColorImage,
 }
 
@@ -60,6 +62,7 @@ impl From<tenka_core::Error> for Failure {
             JxlPixels => 79,
             QualitySample => 80,
             CandidateDimensions => 81,
+            QualityRange(_) => 86,
         };
         Self {
             label,
@@ -85,7 +88,12 @@ pub fn convert(
     })
 }
 
-pub fn compare(context: &Context, file: PathBuf) -> Receiver<Event> {
+pub fn compare(
+    context: &Context,
+    file: PathBuf,
+    min_quality: u8,
+    auto_resize: bool,
+) -> Receiver<Event> {
     run(context, move |emit| {
         let data = match read_image(&file)
             .and_then(|bytes| Source::decode(&bytes).map_err(Failure::from))
@@ -103,25 +111,39 @@ pub fn compare(context: &Context, file: PathBuf) -> Receiver<Event> {
             thumbnail.as_raw(),
         );
         emit(Event::Original(original, format!("{width} × {height}")));
-        for setting in BENCHMARK_SETTINGS {
-            let result = data
-                .measure(setting)
-                .map(|measurement| {
-                    let thumbnail = measurement.preview;
-                    Comparison {
-                        bytes: measurement.bytes,
-                        quality: measurement.quality,
-                        milliseconds: measurement.encode_time.as_secs_f64() * 1000.0,
-                        alpha_exact: measurement.alpha_exact,
-                        preview: ColorImage::from_rgba_unmultiplied(
-                            [thumbnail.width() as usize, thumbnail.height() as usize],
-                            thumbnail.as_raw(),
-                        ),
-                    }
-                })
-                .map_err(Failure::from);
-            emit(Event::Measured(setting, result));
+        for format in OutputFormat::ALL {
+            let result = compare_format(
+                &data,
+                Options {
+                    format,
+                    auto_resize,
+                },
+                min_quality,
+            );
+            emit(Event::Measured(format, result));
         }
+    })
+}
+
+fn compare_format(
+    source: &Source,
+    options: Options,
+    min_quality: u8,
+) -> Result<Comparison, Failure> {
+    let start = Instant::now();
+    let result = source.convert_with_quality(options, min_quality)?;
+    let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
+    let thumbnail = result.preview()?;
+    Ok(Comparison {
+        setting: result.setting,
+        bytes: result.bytes.len(),
+        dimensions: result.dimensions,
+        quality: result.quality,
+        milliseconds,
+        preview: ColorImage::from_rgba_unmultiplied(
+            [thumbnail.width() as usize, thumbnail.height() as usize],
+            thumbnail.as_raw(),
+        ),
     })
 }
 

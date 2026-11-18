@@ -18,8 +18,8 @@ use thiserror::Error;
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_SIDE: u32 = 16_383;
-const MIN_SIMILARITY: f64 = 90.0;
-const MAX_BLOCK_ERROR: f64 = 4.0;
+pub const DEFAULT_QUALITY: u8 = 90;
+const BLOCK_ERROR_PER_POINT: f64 = 0.4;
 const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
 #[derive(Debug, Error)]
@@ -36,6 +36,8 @@ pub enum Error {
     Color,
     #[error("Invalid conversion settings")]
     Options,
+    #[error("Quality {0} is outside the allowed range of 1 to 100")]
+    QualityRange(u8),
     #[error("Image decoding failed")]
     Decode(#[source] image::ImageError),
     #[error("JPEG XL encoding failed")]
@@ -123,6 +125,16 @@ pub struct Output {
     pub setting: Setting,
 }
 
+impl Output {
+    pub fn preview(&self) -> Result<RgbaImage> {
+        let decoded = self.setting.decode(&self.bytes, &parallel_runner())?;
+        if decoded.dimensions() != self.dimensions {
+            return Err(Error::CandidateDimensions);
+        }
+        Ok(raster::limit_size(&decoded, 480).into_owned())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Setting {
     Jxl(f32),
@@ -208,10 +220,32 @@ impl Source {
     }
 
     pub fn convert(&self, options: Options) -> Result<Output> {
+        self.convert_with_quality(options, DEFAULT_QUALITY)
+    }
+
+    /// Optimize for a minimum similarity score from 1 to 100.
+    /// A score of 100 preserves the dimensions and encodes the prepared pixels losslessly.
+    pub fn convert_with_quality(&self, options: Options, min_quality: u8) -> Result<Output> {
+        if !(1..=100).contains(&min_quality) {
+            return Err(Error::QualityRange(min_quality));
+        }
         let runner = parallel_runner();
-        let reference = raster::QualityReference::new(&self.0);
         let (lossless, lossy) = options.format.settings();
-        let mut best = smallest_at(&self.0, &reference, 100.0, lossless, &lossy, &runner)?;
+        if min_quality == 100 {
+            return lossless_output(&self.0, 100.0, lossless, &runner);
+        }
+
+        let min_quality = f64::from(min_quality);
+        let reference = raster::QualityReference::new(&self.0);
+        let mut best = smallest_at(
+            &self.0,
+            &reference,
+            min_quality,
+            100.0,
+            lossless,
+            &lossy,
+            &runner,
+        )?;
 
         if options.auto_resize {
             let source_side = self.0.width().max(self.0.height());
@@ -221,15 +255,22 @@ impl Source {
                 if image.dimensions() == previous_dimensions {
                     continue;
                 }
-                if let Some(quality) = accepted_quality(reference.compare(&image)?) {
-                    previous_dimensions = image.dimensions();
-                    let candidate =
-                        smallest_at(&image, &reference, quality, lossless, &lossy, &runner)?;
-                    if candidate.bytes.len() < best.bytes.len() {
-                        best = candidate;
-                    }
-                } else {
+                let Some(quality) = accepted_quality(reference.compare(&image)?, min_quality)
+                else {
                     break;
+                };
+                previous_dimensions = image.dimensions();
+                let candidate = smallest_at(
+                    &image,
+                    &reference,
+                    min_quality,
+                    quality,
+                    lossless,
+                    &lossy,
+                    &runner,
+                )?;
+                if candidate.bytes.len() < best.bytes.len() {
+                    best = candidate;
                 }
             }
         }
@@ -259,27 +300,38 @@ impl Source {
     }
 }
 
-fn accepted_quality(similarity: Option<raster::Similarity>) -> Option<f64> {
+fn accepted_quality(similarity: Option<raster::Similarity>, min_quality: f64) -> Option<f64> {
+    let max_block_error = (100.0 - min_quality) * BLOCK_ERROR_PER_POINT;
     similarity
-        .filter(|value| value.score >= MIN_SIMILARITY && value.max_block_error <= MAX_BLOCK_ERROR)
+        .filter(|value| value.score >= min_quality && value.max_block_error <= max_block_error)
         .map(|value| value.score)
+}
+
+fn lossless_output(
+    image: &RgbaImage,
+    quality: f64,
+    setting: Setting,
+    runner: &Option<ThreadsRunner<'_>>,
+) -> Result<Output> {
+    Ok(Output {
+        bytes: setting.encode(image, runner)?,
+        dimensions: image.dimensions(),
+        quality,
+        setting,
+    })
 }
 
 fn smallest_at(
     image: &RgbaImage,
     reference: &raster::QualityReference<'_>,
+    min_quality: f64,
     lossless_quality: f64,
     lossless: Setting,
     lossy: &[Setting],
     runner: &Option<ThreadsRunner<'_>>,
 ) -> Result<Output> {
-    let dimensions = image.dimensions();
-    let mut best = Output {
-        bytes: lossless.encode(image, runner)?,
-        dimensions,
-        quality: lossless_quality,
-        setting: lossless,
-    };
+    let mut best = lossless_output(image, lossless_quality, lossless, runner)?;
+    let dimensions = best.dimensions;
     if dimensions.0.min(dimensions.1) < 8 {
         return Ok(best);
     }
@@ -293,7 +345,7 @@ fn smallest_at(
         if !raster::alpha_equal(image, &decoded) {
             break;
         }
-        let Some(quality) = accepted_quality(reference.compare(&decoded)?) else {
+        let Some(quality) = accepted_quality(reference.compare(&decoded)?, min_quality) else {
             break;
         };
         if bytes.len() < best.bytes.len() {
@@ -396,7 +448,7 @@ mod tests {
             assert_eq!(output.setting.format(), format);
             assert_eq!(decoded.dimensions(), source.dimensions());
             assert!(raster::alpha_equal(&source.0, &decoded));
-            assert!(output.quality >= MIN_SIMILARITY);
+            assert!(output.quality >= f64::from(DEFAULT_QUALITY));
         }
     }
 
@@ -412,7 +464,7 @@ mod tests {
         }));
         let output = fine.convert(options).unwrap();
         assert_eq!(output.dimensions, fine.dimensions());
-        assert!(output.quality >= MIN_SIMILARITY);
+        assert!(output.quality >= f64::from(DEFAULT_QUALITY));
 
         let flat = Source(RgbaImage::from_fn(288, 192, |x, y| {
             image::Rgba([
@@ -428,10 +480,37 @@ mod tests {
                 ..options
             })
             .unwrap();
-        let resized = flat.convert(options).unwrap();
+        let resized = flat.convert_with_quality(options, DEFAULT_QUALITY).unwrap();
+        let strict = flat.convert_with_quality(options, 99).unwrap();
         assert!(resized.dimensions.0 < original_size.dimensions.0);
         assert!(resized.bytes.len() < original_size.bytes.len());
-        assert!(resized.quality >= MIN_SIMILARITY);
+        assert!(resized.quality >= f64::from(DEFAULT_QUALITY));
+        assert!(strict.quality >= 99.0);
+        assert!(strict.dimensions.0 > resized.dimensions.0);
+        assert!(strict.bytes.len() > resized.bytes.len());
+    }
+
+    #[test]
+    fn full_quality_round_trips_pixels_and_disables_resizing_for_both_formats() {
+        let source = sample();
+        for format in OutputFormat::ALL {
+            let options = Options {
+                format,
+                auto_resize: true,
+            };
+            let output = source.convert_with_quality(options, 100).unwrap();
+            assert!(output.setting.is_lossless());
+            assert_eq!(output.dimensions, source.dimensions());
+            assert_eq!(output.quality, 100.0);
+            assert_eq!(output.preview().unwrap(), source.0);
+        }
+
+        for quality in [0, 101] {
+            assert!(matches!(
+                source.convert_with_quality(Options::default(), quality),
+                Err(Error::QualityRange(value)) if value == quality
+            ));
+        }
     }
 
     #[test]
@@ -450,9 +529,10 @@ mod tests {
             raster::QualityReference::new(&source.0)
                 .compare(&decoded)
                 .unwrap(),
+            f64::from(DEFAULT_QUALITY),
         )
         .expect("candidate must pass both similarity checks against the original");
-        assert!(checked >= MIN_SIMILARITY);
+        assert!(checked >= f64::from(DEFAULT_QUALITY));
         assert_eq!(checked, output.quality);
     }
 }
