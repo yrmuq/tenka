@@ -5,8 +5,8 @@ use std::{
 
 use eframe::egui::{
     self, Align2, Color32, Context, FontId, IconData, Label, PointerButton, Pos2, Rect, RichText,
-    ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, ThemePreference, Ui, Vec2,
-    pos2, vec2,
+    ScrollArea, Sense, Stroke, TextureFilter, TextureHandle, TextureOptions, ThemePreference, Ui,
+    Vec2, pos2, vec2,
 };
 
 use crate::{
@@ -168,7 +168,7 @@ impl Comparison {
             }
         }
 
-        for (index, (entry, region)) in self.images.iter().zip(regions).enumerate() {
+        for (index, (entry, &region)) in self.images.iter().zip(&regions).enumerate() {
             let painter = ui.painter().with_clip_rect(region);
             painter.rect_filled(region, 0, ui.visuals().extreme_bg_color);
             match &entry.view {
@@ -206,6 +206,23 @@ impl Comparison {
                     );
                     ui.interact(region, ui.id().with(index), Sense::hover())
                         .on_hover_text(&error.detail);
+                }
+            }
+        }
+
+        if self.split && regions.len() > 1 {
+            let painter = ui.painter_at(area);
+            for stroke in [
+                Stroke::new(3.0_f32, Color32::BLACK),
+                Stroke::new(1.0_f32, Color32::WHITE),
+            ] {
+                for region in &regions {
+                    if region.left() > area.left() {
+                        painter.vline(region.left(), region.y_range(), stroke);
+                    }
+                    if region.top() > area.top() {
+                        painter.hline(region.x_range(), region.top(), stroke);
+                    }
                 }
             }
         }
