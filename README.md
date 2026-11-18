@@ -20,7 +20,7 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 
 ## Features
 
-- Batch conversion of still, 8-bit JPEG, PNG, and WebP images to JPEG XL or WebP.
+- Batch conversion of still, 8-bit JPEG, PNG, and WebP images up to 36 megapixels to JPEG XL or WebP.
 - Automatic compression selection and optional resolution reduction based on similarity to the original.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
 - Batch tests at up to eleven quality thresholds in the selected codec, with saved results and previews.

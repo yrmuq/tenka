@@ -16,7 +16,7 @@ use jpegxl_rs::{
 use thiserror::Error;
 
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_PIXELS: u64 = 24_000_000;
+const MAX_PIXELS: u64 = 36_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
 const BLOCK_ERROR_PER_POINT: f64 = 0.4;
