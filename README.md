@@ -12,16 +12,16 @@
 
 ---
 
-Tenka is a Linux image optimizer. Its Rust engine selects JPEG XL compression and can resize each image to meet a file-size target. The engine is a separate Rust library for reuse in desktop apps and container workloads.
+Tenka is a Linux image optimizer. Its Rust engine automatically selects compression and optionally reduces resolution while keeping the saved image visually close to the original. The engine is a separate Rust library for reuse in desktop apps and container workloads.
 
-![Tenka's automatic JPEG XL conversion tab](docs/tenka.jpg)
+![Tenka's automatic conversion tab](docs/tenka.jpg)
 
 ---
 
 ## Features
 
-- Batch conversion of still, 8-bit JPEG, PNG, and WebP images to JPEG XL.
-- Per-image quality selection, optional maximum edge, and optional file-size target.
+- Batch conversion of still, 8-bit JPEG, PNG, and WebP images to JPEG XL or WebP.
+- Automatic compression selection and optional resolution reduction based on similarity to the original.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
 - JPEG XL and WebP comparison with measured file size, quality, encode time, transparency, and previews.
 - English and Russian interface with system, light, and dark themes.
@@ -34,12 +34,13 @@ Tenka is a Linux image optimizer. Its Rust engine selects JPEG XL compression an
 | Input | Action |
 | --- | --- |
 | Drop files or select **Add images** | Add source images to the conversion queue. |
-| Set a target size and enable **Resize if needed** | Try smaller dimensions if the target cannot be met at the starting resolution. |
-| Select **Convert pending** | Save `.jxl` files beside their originals or in the chosen folder. Existing files are kept. |
+| **Output format** | Choose JPEG XL or WebP. |
+| Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. |
+| Select **Convert pending** | Save files in the selected format beside their originals or in the chosen folder. Existing files are kept. |
 | Select **Run comparison** in **Tests** | Measure JPEG XL and WebP variants of the selected source. |
 | Select a codec result | Display it beside the source preview. |
 
-On large images, quality is estimated from a full-frame preview and a native-resolution crop. The score measures encoding at the chosen dimensions.
+Tenka compares each result with the original at the same scale and checks local pixel differences to catch loss of fine detail. For large images, it estimates quality from a full-frame preview and several native-scale crops.
 
 </details>
 
@@ -73,5 +74,5 @@ Tenka is distributed under the [GNU General Public License, version 3](LICENSE).
 | egui / eframe | [emilk/egui](https://github.com/emilk/egui) | `MIT OR Apache-2.0` | Desktop interface. |
 | jpegxl-rs | [inflation/jpegxl-rs](https://github.com/inflation/jpegxl-rs) | `GPL-3.0-or-later` | Rust bindings for JPEG XL. |
 | libjxl | [libjxl/libjxl](https://github.com/libjxl/libjxl) | `BSD-3-Clause` | JPEG XL codec. |
-| libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP comparison encoder. |
+| libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP encoder for conversion and comparison. |
 | SSIMULACRA2 | [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2) | `BSD-2-Clause` | Perceptual quality metric. |

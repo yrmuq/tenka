@@ -18,7 +18,9 @@ use thiserror::Error;
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_SIDE: u32 = 16_383;
-const JXL_DISTANCES: [f32; 4] = [3.0, 2.0, 1.25, 0.75];
+const MIN_SIMILARITY: f64 = 90.0;
+const MAX_BLOCK_ERROR: f64 = 4.0;
+const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -42,7 +44,17 @@ pub enum Error {
     JxlDecode(#[from] jpegxl_rs::DecodeError),
     #[error("WebP encoding failed")]
     WebpEncode,
-    #[error("Quality measurement failed")]
+    #[error("Could not initialize the WebP encoder configuration")]
+    WebpConfig,
+    #[error("Could not decode the encoded WebP candidate")]
+    WebpCandidateDecode(#[source] image::ImageError),
+    #[error("The JPEG XL decoder returned an invalid pixel buffer")]
+    JxlPixels,
+    #[error("The quality metric received an invalid RGB sample")]
+    QualitySample,
+    #[error("The decoded candidate dimensions differ from the encoded dimensions")]
+    CandidateDimensions,
+    #[error("SSIMULACRA2 could not compare the image samples")]
     Measurement,
 }
 
@@ -57,48 +69,102 @@ impl From<image::ImageError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Options {
-    /// Minimum estimated SSIMULACRA2 score for lossy candidates.
-    pub min_score: f64,
-    /// Longest permitted edge in pixels. Images are never enlarged.
-    pub max_side: Option<u32>,
-    /// Target size of the encoded file, in bytes.
-    pub target_bytes: Option<usize>,
-    /// Try smaller dimensions when no candidate reaches the size target.
-    pub resize_for_target: bool,
-    /// Encode the prepared pixels without loss.
-    pub lossless: bool,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputFormat {
+    #[default]
+    JpegXl,
+    Webp,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            min_score: 80.0,
-            max_side: None,
-            target_bytes: None,
-            resize_for_target: false,
-            lossless: false,
+impl OutputFormat {
+    pub const ALL: [Self; 2] = [Self::JpegXl, Self::Webp];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::JpegXl => "JPEG XL",
+            Self::Webp => "WebP",
         }
     }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::JpegXl => "jxl",
+            Self::Webp => "webp",
+        }
+    }
+
+    fn settings(self) -> (Setting, [Setting; 5]) {
+        match self {
+            Self::JpegXl => (
+                Setting::JxlLossless,
+                [0.4, 0.75, 1.25, 2.0, 3.0].map(Setting::Jxl),
+            ),
+            Self::Webp => (
+                Setting::WebpLossless,
+                [98.0, 94.0, 82.0, 70.0, 55.0].map(Setting::Webp),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    pub format: OutputFormat,
+    /// Allow the search to try smaller resolutions.
+    pub auto_resize: bool,
 }
 
 #[derive(Debug)]
 pub struct Output {
     pub bytes: Vec<u8>,
     pub dimensions: (u32, u32),
+    /// Similarity to the original image, including resolution changes.
     pub quality: f64,
-    /// JPEG XL distance used for lossy output.
-    pub distance: Option<f32>,
-    pub meets_target: bool,
+    pub setting: Setting,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Setting {
     Jxl(f32),
     JxlLossless,
     Webp(f32),
     WebpLossless,
+}
+
+impl Setting {
+    pub fn format(self) -> OutputFormat {
+        match self {
+            Self::Jxl(_) | Self::JxlLossless => OutputFormat::JpegXl,
+            Self::Webp(_) | Self::WebpLossless => OutputFormat::Webp,
+        }
+    }
+
+    pub fn is_lossless(self) -> bool {
+        matches!(self, Self::JxlLossless | Self::WebpLossless)
+    }
+
+    fn encode(self, image: &RgbaImage, runner: &Option<ThreadsRunner<'_>>) -> Result<Vec<u8>> {
+        match self {
+            Self::Jxl(distance) if (0.0..=25.0).contains(&distance) && distance > 0.0 => {
+                encode_jxl(image, Some(distance), runner)
+            }
+            Self::JxlLossless => encode_jxl(image, None, runner),
+            Self::Webp(quality) if (0.0..=100.0).contains(&quality) => {
+                encode_webp(image, Some(quality))
+            }
+            Self::WebpLossless => encode_webp(image, None),
+            _ => Err(Error::Options),
+        }
+    }
+
+    fn decode(self, bytes: &[u8], runner: &Option<ThreadsRunner<'_>>) -> Result<RgbaImage> {
+        match self.format() {
+            OutputFormat::JpegXl => decode_jxl(bytes, runner),
+            OutputFormat::Webp => image::load_from_memory_with_format(bytes, ImageFormat::WebP)
+                .map(|image| image.into_rgba8())
+                .map_err(Error::WebpCandidateDecode),
+        }
+    }
 }
 
 pub const BENCHMARK_SETTINGS: [Setting; 10] = [
@@ -142,105 +208,50 @@ impl Source {
     }
 
     pub fn convert(&self, options: Options) -> Result<Output> {
-        if !(-100.0..=100.0).contains(&options.min_score)
-            || options.max_side == Some(0)
-            || options.target_bytes == Some(0)
-        {
-            return Err(Error::Options);
-        }
-
-        let source_side = self.0.width().max(self.0.height());
-        let start = source_side.min(options.max_side.unwrap_or(source_side));
-        let mut sizes = vec![start];
-        if options.resize_for_target && options.target_bytes.is_some() {
-            let floor = 256.min(start);
-            for scale in [85, 70, 55, 40, 25, 15, 8, 0] {
-                let side = (start * scale / 100).max(floor);
-                if !sizes.contains(&side) {
-                    sizes.push(side);
-                }
-            }
-        }
-
         let runner = parallel_runner();
-        let mut fallback: Option<Output> = None;
-        for side in sizes {
-            let image = raster::limit_size(&self.0, side);
-            let mut smallest: Option<Output> = None;
-            if !options.lossless && image.width().min(image.height()) >= 8 {
-                for distance in JXL_DISTANCES {
-                    let bytes = encode_jxl(&image, Some(distance), &runner)?;
-                    if smallest
-                        .as_ref()
-                        .is_some_and(|best| best.bytes.len() <= bytes.len())
-                    {
-                        continue;
+        let reference = raster::QualityReference::new(&self.0);
+        let (lossless, lossy) = options.format.settings();
+        let mut best = smallest_at(&self.0, &reference, 100.0, lossless, &lossy, &runner)?;
+
+        if options.auto_resize {
+            let source_side = self.0.width().max(self.0.height());
+            let mut previous_dimensions = self.0.dimensions();
+            for scale in RESIZE_SCALES {
+                let image = raster::limit_size(&self.0, (source_side * scale / 100).max(1));
+                if image.dimensions() == previous_dimensions {
+                    continue;
+                }
+                if let Some(quality) = accepted_quality(reference.compare(&image)?) {
+                    previous_dimensions = image.dimensions();
+                    let candidate =
+                        smallest_at(&image, &reference, quality, lossless, &lossy, &runner)?;
+                    if candidate.bytes.len() < best.bytes.len() {
+                        best = candidate;
                     }
-                    let decoded = decode_jxl(&bytes, &runner)?;
-                    if !raster::alpha_equal(&image, &decoded) {
-                        continue;
-                    }
-                    let quality = raster::quality(&image, &decoded)?.ok_or(Error::Measurement)?;
-                    if quality >= options.min_score {
-                        smallest = Some(output(
-                            &image,
-                            bytes,
-                            quality,
-                            Some(distance),
-                            options.target_bytes,
-                        ));
-                    }
+                } else {
+                    break;
                 }
             }
-
-            let lossless = encode_jxl(&image, None, &runner)?;
-            if smallest
-                .as_ref()
-                .is_none_or(|best| lossless.len() < best.bytes.len())
-            {
-                smallest = Some(output(&image, lossless, 100.0, None, options.target_bytes));
-            }
-
-            let best = smallest.ok_or(Error::Measurement)?;
-            if best.meets_target {
-                return Ok(best);
-            }
-            if fallback
-                .as_ref()
-                .is_none_or(|other| best.bytes.len() < other.bytes.len())
-            {
-                fallback = Some(best);
-            }
         }
-        fallback.ok_or(Error::Measurement)
+        Ok(best)
     }
 
     pub fn measure(&self, setting: Setting) -> Result<Measurement> {
         let image = &self.0;
         let runner = parallel_runner();
         let start = Instant::now();
-        let bytes = match setting {
-            Setting::Jxl(distance) if (0.0..=25.0).contains(&distance) && distance > 0.0 => {
-                encode_jxl(image, Some(distance), &runner)?
-            }
-            Setting::JxlLossless => encode_jxl(image, None, &runner)?,
-            Setting::Webp(quality) if (0.0..=100.0).contains(&quality) => {
-                encode_webp(image, Some(quality))?
-            }
-            Setting::WebpLossless => encode_webp(image, None)?,
-            _ => return Err(Error::Options),
-        };
+        let bytes = setting.encode(image, &runner)?;
         let encode_time = start.elapsed();
-        let decoded = match setting {
-            Setting::Jxl(_) | Setting::JxlLossless => decode_jxl(&bytes, &runner)?,
-            Setting::Webp(_) | Setting::WebpLossless => {
-                image::load_from_memory_with_format(&bytes, ImageFormat::WebP)?.into_rgba8()
-            }
-        };
+        let decoded = setting.decode(&bytes, &runner)?;
+        if decoded.dimensions() != image.dimensions() {
+            return Err(Error::CandidateDimensions);
+        }
         Ok(Measurement {
             setting,
             bytes: bytes.len(),
-            quality: raster::quality(image, &decoded)?,
+            quality: raster::QualityReference::new(image)
+                .compare(&decoded)?
+                .map(|value| value.score),
             encode_time,
             alpha_exact: raster::alpha_equal(image, &decoded),
             preview: raster::limit_size(&decoded, 480).into_owned(),
@@ -248,20 +259,53 @@ impl Source {
     }
 }
 
-fn output(
+fn accepted_quality(similarity: Option<raster::Similarity>) -> Option<f64> {
+    similarity
+        .filter(|value| value.score >= MIN_SIMILARITY && value.max_block_error <= MAX_BLOCK_ERROR)
+        .map(|value| value.score)
+}
+
+fn smallest_at(
     image: &RgbaImage,
-    bytes: Vec<u8>,
-    quality: f64,
-    distance: Option<f32>,
-    target: Option<usize>,
-) -> Output {
-    Output {
-        dimensions: image.dimensions(),
-        meets_target: target.is_none_or(|limit| bytes.len() <= limit),
-        bytes,
-        quality,
-        distance,
+    reference: &raster::QualityReference<'_>,
+    lossless_quality: f64,
+    lossless: Setting,
+    lossy: &[Setting],
+    runner: &Option<ThreadsRunner<'_>>,
+) -> Result<Output> {
+    let dimensions = image.dimensions();
+    let mut best = Output {
+        bytes: lossless.encode(image, runner)?,
+        dimensions,
+        quality: lossless_quality,
+        setting: lossless,
+    };
+    if dimensions.0.min(dimensions.1) < 8 {
+        return Ok(best);
     }
+
+    for &setting in lossy {
+        let bytes = setting.encode(image, runner)?;
+        let decoded = setting.decode(&bytes, runner)?;
+        if decoded.dimensions() != dimensions {
+            return Err(Error::CandidateDimensions);
+        }
+        if !raster::alpha_equal(image, &decoded) {
+            break;
+        }
+        let Some(quality) = accepted_quality(reference.compare(&decoded)?) else {
+            break;
+        };
+        if bytes.len() < best.bytes.len() {
+            best = Output {
+                bytes,
+                dimensions,
+                quality,
+                setting,
+            };
+        }
+    }
+    Ok(best)
 }
 
 fn parallel_runner() -> Option<ThreadsRunner<'static>> {
@@ -296,7 +340,7 @@ fn encode_jxl(
 }
 
 fn encode_webp(image: &RgbaImage, quality: Option<f32>) -> Result<Vec<u8>> {
-    let mut config = webp::WebPConfig::new().map_err(|_| Error::WebpEncode)?;
+    let mut config = webp::WebPConfig::new().map_err(|_| Error::WebpConfig)?;
     config.lossless = i32::from(quality.is_none());
     config.quality = quality.unwrap_or(75.0);
     config.exact = 1;
@@ -314,7 +358,7 @@ fn decode_jxl(bytes: &[u8], runner: &Option<ThreadsRunner<'_>>) -> Result<RgbaIm
         })
         .maybe_parallel_runner(runner.as_ref().map(|runner| runner as &dyn ParallelRunner));
     let (metadata, pixels) = builder.build()?.decode_with::<u8>(bytes)?;
-    RgbaImage::from_raw(metadata.width, metadata.height, pixels).ok_or(Error::Measurement)
+    RgbaImage::from_raw(metadata.width, metadata.height, pixels).ok_or(Error::JxlPixels)
 }
 
 #[cfg(test)]
@@ -325,18 +369,6 @@ mod tests {
         Source(RgbaImage::from_fn(48, 32, |x, y| {
             image::Rgba([(x * 5) as u8, (y * 7) as u8, 40, (x * 3 + y) as u8])
         }))
-    }
-
-    #[test]
-    fn lossless_jxl_round_trips_transparency_and_pixels() {
-        let source = sample();
-        let output = source
-            .convert(Options {
-                lossless: true,
-                ..Options::default()
-            })
-            .unwrap();
-        assert_eq!(decode_jxl(&output.bytes, &None).unwrap(), source.0);
     }
 
     #[test]
@@ -351,39 +383,76 @@ mod tests {
     }
 
     #[test]
-    fn auto_reports_an_unreachable_limit_and_keeps_the_allowed_dimensions() {
-        let output = sample()
-            .convert(Options {
-                max_side: Some(24),
-                target_bytes: Some(1),
-                ..Options::default()
-            })
-            .unwrap();
-        assert_eq!(output.dimensions, (24, 16));
-        assert!(!output.meets_target);
-        assert!(output.quality >= Options::default().min_score);
+    fn conversion_uses_the_requested_codec_and_preserves_dimensions_by_default() {
+        let source = sample();
+        for format in OutputFormat::ALL {
+            let output = source
+                .convert(Options {
+                    format,
+                    ..Options::default()
+                })
+                .unwrap();
+            let decoded = output.setting.decode(&output.bytes, &None).unwrap();
+            assert_eq!(output.setting.format(), format);
+            assert_eq!(decoded.dimensions(), source.dimensions());
+            assert!(raster::alpha_equal(&source.0, &decoded));
+            assert!(output.quality >= MIN_SIMILARITY);
+        }
     }
 
     #[test]
-    fn target_can_reduce_resolution_after_preserving_the_larger_image_first() {
-        let source = Source(RgbaImage::from_fn(600, 400, |x, y| {
+    fn automatic_resize_preserves_fine_detail_and_can_shrink_flat_images() {
+        let options = Options {
+            format: OutputFormat::Webp,
+            auto_resize: true,
+        };
+        let fine = Source(RgbaImage::from_fn(128, 96, |x, y| {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            image::Rgba([value, value, value, 255])
+        }));
+        let output = fine.convert(options).unwrap();
+        assert_eq!(output.dimensions, fine.dimensions());
+        assert!(output.quality >= MIN_SIMILARITY);
+
+        let flat = Source(RgbaImage::from_fn(288, 192, |x, y| {
+            image::Rgba([
+                (12 + x * 130 / 288) as u8,
+                (20 + y * 130 / 192) as u8,
+                (65 + (x + y) * 115 / 480) as u8,
+                255,
+            ])
+        }));
+        let original_size = flat
+            .convert(Options {
+                auto_resize: false,
+                ..options
+            })
+            .unwrap();
+        let resized = flat.convert(options).unwrap();
+        assert!(resized.dimensions.0 < original_size.dimensions.0);
+        assert!(resized.bytes.len() < original_size.bytes.len());
+        assert!(resized.quality >= MIN_SIMILARITY);
+    }
+
+    #[test]
+    fn codec_and_resize_losses_share_one_original_reference() {
+        let source = Source(RgbaImage::from_fn(240, 160, |x, y| {
             image::Rgba([(x * 19 + y * 11) as u8, (y * 13) as u8, (x * y) as u8, 255])
         }));
-        let baseline = source
+        let output = source
             .convert(Options {
-                lossless: true,
-                ..Options::default()
+                format: OutputFormat::Webp,
+                auto_resize: true,
             })
             .unwrap();
-        let resized = source
-            .convert(Options {
-                target_bytes: Some(baseline.bytes.len() - 1),
-                resize_for_target: true,
-                lossless: true,
-                ..Options::default()
-            })
-            .unwrap();
-        assert!(resized.meets_target);
-        assert!(resized.dimensions.0 < baseline.dimensions.0);
+        let decoded = output.setting.decode(&output.bytes, &None).unwrap();
+        let checked = accepted_quality(
+            raster::QualityReference::new(&source.0)
+                .compare(&decoded)
+                .unwrap(),
+        )
+        .expect("candidate must pass both similarity checks against the original");
+        assert!(checked >= MIN_SIMILARITY);
+        assert_eq!(checked, output.quality);
     }
 }

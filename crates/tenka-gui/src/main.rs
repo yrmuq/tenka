@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use jobs::{Comparison, Conversion, Event, Failure};
 use language::{Catalog, LANGUAGES};
-use tenka_core::{Options, Setting};
+use tenka_core::{Options, OutputFormat, Setting};
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -63,10 +63,7 @@ struct Tenka {
     catalog: Catalog,
     queue: Vec<QueueEntry>,
     folder: Option<PathBuf>,
-    profile: u16,
-    max_edge: String,
-    target: String,
-    allow_resize: bool,
+    conversion: Options,
     test_file: Option<PathBuf>,
     test_rows: Vec<TestRow>,
     original: Option<(TextureHandle, String)>,
@@ -117,10 +114,7 @@ impl Tenka {
             theme,
             queue: Vec::new(),
             folder: None,
-            profile: 15,
-            max_edge: String::new(),
-            target: String::new(),
-            allow_resize: false,
+            conversion: Options::default(),
             test_file: None,
             test_rows: Vec::new(),
             original: None,
@@ -215,7 +209,7 @@ impl Tenka {
     }
 
     fn show_convert(&mut self, ui: &mut Ui) {
-        ui.heading(self.label(12));
+        ui.heading(self.label(72));
         let busy = self.worker.is_some();
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, Button::new(self.label(8))).clicked()
@@ -252,49 +246,27 @@ impl Tenka {
         ui.add_space(6.0);
         section(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                Grid::new("settings")
-                    .num_columns(2)
-                    .spacing([20.0, 10.0])
-                    .show(ui, |ui| {
-                        ui.label(self.label(13));
-                        let profiles = [14, 15, 16, 17].map(|id| (id, self.label(id)));
-                        ComboBox::from_id_salt("quality")
-                            .selected_text(self.label(self.profile))
-                            .width(164.0)
-                            .show_ui(ui, |ui| {
-                                for (id, label) in profiles {
-                                    ui.selectable_value(&mut self.profile, id, label);
-                                }
-                            });
-                        ui.end_row();
-                        let no_limit = self.label(20);
-                        ui.label(self.label(18));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.max_edge)
-                                .hint_text(no_limit)
-                                .desired_width(164.0),
-                        );
-                        ui.end_row();
-                        ui.label(self.label(19));
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.target)
-                                    .hint_text(no_limit)
-                                    .desired_width(164.0),
-                            );
-                            let resize = self.label(21);
-                            ui.add_enabled(
-                                !self.target.trim().is_empty(),
-                                egui::Checkbox::new(&mut self.allow_resize, resize),
-                            )
-                            .on_hover_text(self.label(66));
+                ui.horizontal(|ui| {
+                    ui.label(self.label(73));
+                    ComboBox::from_id_salt("output_format")
+                        .selected_text(self.conversion.format.name())
+                        .width(164.0)
+                        .show_ui(ui, |ui| {
+                            for format in OutputFormat::ALL {
+                                ui.selectable_value(
+                                    &mut self.conversion.format,
+                                    format,
+                                    format.name(),
+                                );
+                            }
                         });
-                        ui.end_row();
-                    });
+                });
+                let resize = self.label(74);
+                ui.checkbox(&mut self.conversion.auto_resize, resize)
+                    .on_hover_text(self.label(75));
             });
         });
 
-        let options = self.options();
         let pending = self
             .queue
             .iter()
@@ -303,11 +275,10 @@ impl Tenka {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
-                    !busy && pending > 0 && options.is_some(),
+                    !busy && pending > 0,
                     Button::new(self.label(22)).min_size([140.0, 27.0].into()),
                 )
                 .clicked()
-                && let Some(options) = options
             {
                 self.folder_failure = None;
                 let entries = self
@@ -323,12 +294,10 @@ impl Tenka {
                     ui.ctx(),
                     entries,
                     self.folder.clone(),
-                    options,
+                    self.conversion,
                 ));
             }
-            if options.is_none() {
-                ui.colored_label(ui.visuals().error_fg_color, self.label(31));
-            } else if pending > 0 {
+            if pending > 0 {
                 ui.weak(format!("{}  {pending}", self.label(68)));
             }
             if matches!(self.tab, Tab::Convert)
@@ -360,7 +329,7 @@ impl Tenka {
                 .striped(true)
                 .min_col_width(145.0)
                 .show(ui, |ui| {
-                    for id in [28, 29, 30] {
+                    for id in [28, 76, 30] {
                         ui.strong(self.label(id));
                     }
                     ui.end_row();
@@ -371,6 +340,19 @@ impl Tenka {
                             Status::Done(Ok(result)) => {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
+                                        ui.weak(size(result.source_bytes));
+                                        let (arrow, _) = ui.allocate_exact_size(
+                                            egui::vec2(12.0, 10.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().arrow(
+                                            arrow.left_center(),
+                                            egui::vec2(arrow.width(), 0.0),
+                                            egui::Stroke::new(
+                                                1.0_f32,
+                                                ui.visuals().weak_text_color(),
+                                            ),
+                                        );
                                         ui.strong(format!(
                                             "{} · {} × {}",
                                             size(result.bytes),
@@ -383,24 +365,11 @@ impl Tenka {
                                             format!("{:.1}", result.quality)
                                         });
                                     });
-                                    let hover = format!(
-                                        "{}  {}\n{}",
-                                        self.label(69),
-                                        size(result.source_bytes),
-                                        path_label(&result.path)
-                                    );
                                     ui.add(egui::Label::new(file_name(&result.path)).truncate())
-                                        .on_hover_text(hover);
+                                        .on_hover_text(path_label(&result.path));
                                 });
                                 ui.vertical(|ui| {
-                                    if result.meets_target {
-                                        ui.label(self.label(26));
-                                    } else {
-                                        ui.colored_label(
-                                            ui.visuals().warn_fg_color,
-                                            self.label(27),
-                                        );
-                                    }
+                                    ui.label(self.label(26));
                                     if ui.small_button(self.label(70)).clicked()
                                         && let Some(parent) = result.path.parent()
                                         && let Err(error) = std::process::Command::new("xdg-open")
@@ -573,27 +542,6 @@ impl Tenka {
         self.test_failure = None;
     }
 
-    fn options(&self) -> Option<Options> {
-        let max_side = positive::<u32>(&self.max_edge)?;
-        let target_kib = positive::<usize>(&self.target)?;
-        let target_bytes = match target_kib {
-            Some(value) => Some(value.checked_mul(1024)?),
-            None => None,
-        };
-        let min_score = match self.profile {
-            14 => 87.0,
-            16 => 72.0,
-            _ => Options::default().min_score,
-        };
-        Some(Options {
-            min_score,
-            max_side,
-            target_bytes,
-            resize_for_target: self.allow_resize,
-            lossless: self.profile == 17,
-        })
-    }
-
     fn poll_worker(&mut self, context: &Context) {
         while let Some(worker) = &self.worker {
             match worker.try_recv() {
@@ -642,8 +590,11 @@ impl Tenka {
     }
 
     fn show_error(&self, ui: &mut Ui, error: &Failure) {
-        ui.colored_label(ui.visuals().error_fg_color, self.label(error.label))
-            .on_hover_text(&error.detail);
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!("[E{}] {}", error.label, self.label(error.label)),
+        )
+        .on_hover_text(&error.detail);
     }
 }
 
@@ -706,18 +657,6 @@ fn section(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
             ui.set_min_width(ui.available_width());
             contents(ui);
         });
-}
-
-fn positive<T>(input: &str) -> Option<Option<T>>
-where
-    T: std::str::FromStr + Default + PartialOrd,
-{
-    let value = input.trim();
-    if value.is_empty() {
-        return Some(None);
-    }
-    let value = value.parse().ok()?;
-    (value > T::default()).then_some(Some(value))
 }
 
 fn path_label(path: &Path) -> String {

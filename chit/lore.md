@@ -4,6 +4,7 @@
 
 ## Required Behavior
 
-- Keep input dimensions by default and reduce them only with a maximum edge or when the user explicitly allows resizing for a byte target.
+- Keep the user's chosen output format throughout automatic conversion.
+- Keep input dimensions unless the user enables automatic resolution reduction.
 - Keep original files and existing output files intact when saving conversions.
-- Report whether a byte target was met and preserve the selected quality floor when the target is too small.
+- Judge compression and resizing against the same original at a common scale so that the search accounts for detail lost during resizing.

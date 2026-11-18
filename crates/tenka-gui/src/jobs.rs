@@ -7,7 +7,7 @@ use std::{
 };
 
 use eframe::egui::{ColorImage, Context};
-use tenka_core::{BENCHMARK_SETTINGS, MAX_INPUT_BYTES, Options, Setting, Source};
+use tenka_core::{BENCHMARK_SETTINGS, MAX_INPUT_BYTES, Options, OutputFormat, Setting, Source};
 
 pub enum Event {
     Started(usize),
@@ -25,7 +25,6 @@ pub struct Conversion {
     pub dimensions: (u32, u32),
     pub quality: f64,
     pub lossless: bool,
-    pub meets_target: bool,
 }
 
 pub struct Comparison {
@@ -56,10 +55,15 @@ impl From<tenka_core::Error> for Failure {
             JxlDecode(_) => 56,
             WebpEncode => 57,
             Measurement => 58,
+            WebpConfig => 77,
+            WebpCandidateDecode(_) => 78,
+            JxlPixels => 79,
+            QualitySample => 80,
+            CandidateDimensions => 81,
         };
         Self {
             label,
-            detail: error.to_string(),
+            detail: std::error::Error::source(&error).map_or_else(String::new, ToString::to_string),
         }
     }
 }
@@ -141,20 +145,23 @@ fn convert_one(
     folder: Option<&Path>,
     options: Options,
 ) -> Result<Conversion, Failure> {
-    let source = read_image(path)?;
-    let output = Source::decode(&source)?.convert(options)?;
-    let path = save_image(path, folder, &output.bytes).map_err(|error| Failure {
-        label: 60,
-        detail: error.to_string(),
-    })?;
+    let bytes = read_image(path)?;
+    let source = Source::decode(&bytes)?;
+    let output = source.convert(options)?;
+    let path =
+        save_image(path, folder, output.setting.format(), &output.bytes).map_err(|error| {
+            Failure {
+                label: 60,
+                detail: error.to_string(),
+            }
+        })?;
     Ok(Conversion {
         path,
-        source_bytes: source.len(),
+        source_bytes: bytes.len(),
         bytes: output.bytes.len(),
         dimensions: output.dimensions,
         quality: output.quality,
-        lossless: output.distance.is_none(),
-        meets_target: output.meets_target,
+        lossless: output.setting.is_lossless() && output.dimensions == source.dimensions(),
     })
 }
 
@@ -178,7 +185,12 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
     })
 }
 
-fn save_image(source: &Path, folder: Option<&Path>, bytes: &[u8]) -> io::Result<PathBuf> {
+fn save_image(
+    source: &Path,
+    folder: Option<&Path>,
+    format: OutputFormat,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
     let folder = folder
         .or_else(|| source.parent())
         .filter(|p| !p.as_os_str().is_empty())
@@ -193,7 +205,8 @@ fn save_image(source: &Path, folder: Option<&Path>, bytes: &[u8]) -> io::Result<
         if i > 0 {
             name.push(format!("-{i}"));
         }
-        name.push(".jxl");
+        name.push(".");
+        name.push(format.extension());
         let path = folder.join(name);
         match temp.persist_noclobber(&path) {
             Ok(_) => return Ok(path),
@@ -212,13 +225,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_never_overwrites_a_previous_output() {
+    fn saving_the_same_format_preserves_the_input_and_existing_outputs() {
         let folder = tempfile::tempdir().unwrap();
-        let input = folder.path().join("image.png");
-        let first = save_image(&input, None, b"one").unwrap();
-        let second = save_image(&input, None, b"two").unwrap();
+        let input = folder.path().join("image.webp");
+        fs::write(&input, b"input").unwrap();
+        let first = save_image(&input, None, OutputFormat::Webp, b"one").unwrap();
+        let second = save_image(&input, None, OutputFormat::Webp, b"two").unwrap();
+        assert_eq!(fs::read(input).unwrap(), b"input");
+        assert_eq!(first.file_name().unwrap(), "image-1.webp");
         assert_eq!(fs::read(first).unwrap(), b"one");
-        assert_eq!(second.file_name().unwrap(), "image-1.jxl");
-        assert_eq!(fs::read(second).unwrap(), b"two");
+        assert_eq!(second.file_name().unwrap(), "image-2.webp");
+        assert_eq!(fs::read(&second).unwrap(), b"two");
+        let jxl = save_image(&second, None, OutputFormat::JpegXl, b"three").unwrap();
+        assert_eq!(jxl.file_name().unwrap(), "image-2.jxl");
     }
 }
