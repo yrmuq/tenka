@@ -11,6 +11,7 @@
 - Run the same automatic conversion search in the Tests tab so its comparisons reflect what the conversion engine can produce at the selected quality.
 - Name each saved test result with its requested quality as the final part of the file stem, including when resolving name collisions.
 - Keep the comparison window's zoom and pan tied to the same relative image coordinates at every rendered resolution.
+- In Split mode, draw every image into one shared frame and clip each image to its assigned region.
 
 ## Compatibility Workarounds
 

@@ -4,14 +4,16 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align2, Color32, Context, FontId, IconData, PointerButton, Pos2, Rect, Sense,
-    TextureFilter, TextureHandle, TextureOptions, ThemePreference, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, Context, FontId, IconData, Label, PointerButton, Pos2, Rect, RichText,
+    ScrollArea, Sense, TextureFilter, TextureHandle, TextureOptions, ThemePreference, Ui, Vec2,
+    pos2, vec2,
 };
 
 use crate::{
     file_name,
     jobs::{self, ComparisonPixels, Failure},
     language::Catalog,
+    path_label,
 };
 
 pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Result {
@@ -37,6 +39,7 @@ pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Re
                 next: 0,
                 loading: None,
                 camera: Camera::default(),
+                split: true,
             }))
         }),
     )
@@ -48,6 +51,7 @@ struct Comparison {
     next: usize,
     loading: Option<Receiver<Result<ComparisonPixels, Failure>>>,
     camera: Camera,
+    split: bool,
 }
 
 struct Entry {
@@ -131,14 +135,26 @@ impl Comparison {
             return;
         }
 
-        let cells = cells(area, self.images.len());
-        for (index, (entry, cell)) in self.images.iter().zip(&cells).enumerate() {
+        let shared_frame = if self.split {
+            self.images.iter().find_map(|entry| match &entry.view {
+                EntryView::Image { size, .. } => Some((area, *size)),
+                _ => None,
+            })
+        } else {
+            None
+        };
+        let regions = cells(area, self.images.len())
+            .into_iter()
+            .map(|cell| if self.split { cell } else { cell.shrink(1.0) })
+            .collect::<Vec<_>>();
+
+        for (index, (entry, &region)) in self.images.iter().zip(&regions).enumerate() {
             let EntryView::Image { size, .. } = &entry.view else {
                 continue;
             };
-            let image_area = image_area(*cell);
-            let response = ui.interact(image_area, ui.id().with(index), Sense::drag());
-            let fitted = fit(*size, image_area.size());
+            let (frame, size) = shared_frame.unwrap_or((region, *size));
+            let response = ui.interact(region, ui.id().with(index), Sense::drag());
+            let fitted = fit(size, frame.size());
             if response.dragged_by(PointerButton::Primary) {
                 self.camera.pan(response.drag_delta(), fitted);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -147,24 +163,24 @@ impl Comparison {
                 let scroll = ui.input_mut(|input| std::mem::take(&mut input.raw_scroll_delta.y));
                 if scroll != 0.0 {
                     self.camera
-                        .zoom_at(scroll, pointer - image_area.center(), fitted);
+                        .zoom_at(scroll, pointer - frame.center(), fitted);
                 }
             }
         }
 
-        for (index, (entry, cell)) in self.images.iter().zip(cells).enumerate() {
-            let image_area = image_area(cell);
-            let painter = ui.painter().with_clip_rect(image_area);
-            painter.rect_filled(image_area, 0, ui.visuals().extreme_bg_color);
+        for (index, (entry, region)) in self.images.iter().zip(regions).enumerate() {
+            let painter = ui.painter().with_clip_rect(region);
+            painter.rect_filled(region, 0, ui.visuals().extreme_bg_color);
             match &entry.view {
                 EntryView::Image { size, tiles } => {
-                    let image = self.camera.image_rect(image_area, *size);
+                    let (frame, size) = shared_frame.unwrap_or((region, *size));
+                    let image = self.camera.image_rect(frame, size);
                     for (bounds, texture) in tiles {
                         let tile = Rect::from_min_max(
                             image.lerp_inside(bounds.min.to_vec2()),
                             image.lerp_inside(bounds.max.to_vec2()),
                         );
-                        if tile.intersects(image_area) {
+                        if tile.intersects(region) {
                             painter.image(
                                 texture.id(),
                                 tile,
@@ -177,30 +193,52 @@ impl Comparison {
                 EntryView::Pending => {
                     egui::Spinner::new().paint_at(
                         ui,
-                        Rect::from_center_size(image_area.center(), Vec2::splat(18.0)),
+                        Rect::from_center_size(region.center(), Vec2::splat(18.0)),
                     );
                 }
                 EntryView::Failed(error) => {
                     painter.text(
-                        image_area.center(),
+                        region.center(),
                         Align2::CENTER_CENTER,
                         format!("[E{}] {}", error.label, self.catalog.text(error.label)),
                         FontId::proportional(14.0),
                         ui.visuals().error_fg_color,
                     );
-                    ui.interact(image_area, ui.id().with(index), Sense::hover())
+                    ui.interact(region, ui.id().with(index), Sense::hover())
                         .on_hover_text(&error.detail);
                 }
             }
-            let caption = Rect::from_min_max(pos2(cell.min.x, image_area.max.y), cell.max);
-            ui.painter().with_clip_rect(caption).text(
-                pos2(caption.min.x + 6.0, caption.center().y),
-                Align2::LEFT_CENTER,
-                file_name(&entry.path),
-                FontId::proportional(13.0),
-                ui.visuals().text_color(),
-            );
         }
+    }
+
+    fn show_captions(&self, context: &Context) {
+        let count = self.images.len();
+        if count == 0 {
+            return;
+        }
+        let height = row_count(count) as f32 * 38.0;
+        let panel_height = height.min((context.available_rect().height() / 2.0).max(38.0));
+        egui::TopBottomPanel::bottom("comparison_captions")
+            .exact_height(panel_height)
+            .frame(egui::Frame::side_top_panel(&context.style()).inner_margin(0))
+            .show(context, |ui| {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let (area, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), height),
+                            Sense::hover(),
+                        );
+                        for (entry, cell) in self.images.iter().zip(cells(area, count)) {
+                            ui.put(
+                                cell.shrink2(vec2(6.0, 0.0)),
+                                Label::new(RichText::new(file_name(&entry.path)).size(26.0))
+                                    .truncate(),
+                            )
+                            .on_hover_text(path_label(&entry.path));
+                        }
+                    });
+            });
     }
 }
 
@@ -209,18 +247,27 @@ impl eframe::App for Comparison {
         let drops = context.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
         self.add(drops.into_iter().filter_map(|file| file.path));
         egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
-            if ui.button(self.catalog.text(8)).clicked()
-                && let Some(files) = rfd::FileDialog::new()
-                    .add_filter(
-                        "JPEG / PNG / WebP / JPEG XL",
-                        &["jpg", "jpeg", "png", "webp", "jxl"],
-                    )
-                    .pick_files()
-            {
-                self.add(files);
-            }
+            ui.horizontal(|ui| {
+                if ui.button(self.catalog.text(8)).clicked()
+                    && let Some(files) = rfd::FileDialog::new()
+                        .add_filter(
+                            "JPEG / PNG / WebP / JPEG XL",
+                            &["jpg", "jpeg", "png", "webp", "jxl"],
+                        )
+                        .pick_files()
+                {
+                    self.add(files);
+                }
+                if ui
+                    .selectable_label(self.split, self.catalog.text(104))
+                    .clicked()
+                {
+                    self.split = !self.split;
+                }
+            });
         });
         self.load_images(context);
+        self.show_captions(context);
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&context.style()).inner_margin(0))
             .show(context, |ui| self.show_images(ui));
@@ -228,8 +275,7 @@ impl eframe::App for Comparison {
 }
 
 fn cells(area: Rect, count: usize) -> Vec<Rect> {
-    let columns = count.div_ceil(count.isqrt());
-    let rows = count.div_ceil(columns);
+    let rows = row_count(count);
     let height = area.height() / rows as f32;
     let mut cells = Vec::with_capacity(count);
     for row in 0..rows {
@@ -237,16 +283,15 @@ fn cells(area: Rect, count: usize) -> Vec<Rect> {
         let width = area.width() / count_in_row as f32;
         for column in 0..count_in_row {
             let top_left = area.min + vec2(column as f32 * width, row as f32 * height);
-            cells.push(Rect::from_min_size(top_left, vec2(width, height)).shrink(1.0));
+            cells.push(Rect::from_min_size(top_left, vec2(width, height)));
         }
     }
     cells
 }
 
-fn image_area(cell: Rect) -> Rect {
-    let mut image = cell;
-    image.max.y -= (cell.height() / 3.0).min(22.0);
-    image
+fn row_count(count: usize) -> usize {
+    let columns = count.div_ceil(count.isqrt());
+    count.div_ceil(columns)
 }
 
 fn fit(image: Vec2, area: Vec2) -> Vec2 {
