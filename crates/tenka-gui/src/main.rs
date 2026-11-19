@@ -291,7 +291,9 @@ impl Tenka {
             } else if pending > 0 {
                 ui.put(
                     center,
-                    egui::Label::new(RichText::new(format!("{}  {pending}", self.label(68))).weak()),
+                    egui::Label::new(
+                        RichText::new(format!("{}  {pending}", self.label(68))).weak(),
+                    ),
                 );
             }
         }
@@ -303,7 +305,8 @@ impl Tenka {
         }
         ui.separator();
 
-        if add_images_prompt(ui, &self.catalog, !busy) && let Some(files) = self.picker().pick_files()
+        if add_images_prompt(ui, &self.catalog, !busy)
+            && let Some(files) = self.picker().pick_files()
         {
             self.add_files(files);
         }
