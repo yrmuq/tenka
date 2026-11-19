@@ -285,7 +285,7 @@ impl Tenka {
                             Status::Done(Ok(Some(result))) => {
                                 ui.add(
                                     egui::Label::new(format!(
-                                        "{} → {}",
+                                        "{} -> {}",
                                         self.catalog.file_size(result.source_bytes),
                                         self.catalog.file_size(result.bytes),
                                     ))
