@@ -2916,6 +2916,7 @@ dependencies = [
  "smithay-clipboard",
  "tempfile",
  "tenka-core",
+ "url",
  "zbus",
 ]
 

@@ -124,6 +124,45 @@ pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
     send
 }
 
+pub fn reveal_file(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
+    let context = context.clone();
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = show_file_in_manager(&path).map_err(|detail| Failure {
+            label: 133,
+            detail: format!("{}\n{detail}", path.display()),
+        });
+        if send.send(result).is_ok() {
+            context.request_repaint();
+        }
+    });
+    receive
+}
+
+#[cfg(target_os = "linux")]
+fn show_file_in_manager(path: &Path) -> Result<(), String> {
+    use zbus::blocking::{Connection, Proxy};
+
+    let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+    let uri = url::Url::from_file_path(absolute)
+        .map_err(|()| "The file path could not be converted to a URI".to_owned())?;
+    let uris = [uri.as_str()];
+    let connection = Connection::session().map_err(|error| error.to_string())?;
+    Proxy::new(
+        &connection,
+        "org.freedesktop.FileManager1",
+        "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1",
+    )
+    .and_then(|proxy| proxy.call("ShowItems", &(uris.as_slice(), "")))
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn show_file_in_manager(_: &Path) -> Result<(), String> {
+    Err("Showing files in the desktop file manager is supported on Linux".into())
+}
+
 fn probe_input(path: &Path) -> InputSize {
     let Some(metadata) = fs::metadata(path).ok().filter(fs::Metadata::is_file) else {
         return InputSize::default();

@@ -136,6 +136,24 @@ pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {
     response
 }
 
+pub(crate) fn reveal_file(ui: &mut Ui, label: &str) -> Response {
+    let response = icon_button(ui, label);
+    let center = response.rect.center();
+    let outline = [
+        (-8.0, -6.0),
+        (-2.0, -6.0),
+        (0.0, -3.5),
+        (8.0, -3.5),
+        (8.0, 6.0),
+        (-8.0, 6.0),
+    ]
+    .map(|(x, y)| center + vec2(x, y));
+    let stroke = Stroke::new(1.3_f32, ui.style().interact(&response).text_color());
+    ui.painter()
+        .add(Shape::closed_line(outline.to_vec(), stroke));
+    response
+}
+
 pub(crate) fn output_folder(ui: &mut Ui, name: String, enabled: bool) -> Response {
     ui.add_enabled_ui(enabled, |ui| {
         let arrow = ui.id().with("folder_arrow");

@@ -13,4 +13,5 @@ tenka-core = { path = "../tenka-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 smithay-clipboard = "0.7.3"
+url = "2"
 zbus = "5"

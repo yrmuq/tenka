@@ -109,12 +109,14 @@ struct Tenka {
     file_drops: FileDrops,
     catalog: Catalog,
     queue: Vec<QueueEntry>,
+    queue_jump: Option<usize>,
     input_probes: Sender<Vec<InputProbe>>,
     file_column_fraction: f32,
     folder: Option<PathBuf>,
     format: OutputFormat,
     mode: OptimizationMode,
     folder_failure: Option<Failure>,
+    folder_request: Option<Receiver<Result<(), Failure>>>,
     worker: Option<Batch>,
     comparison_windows: Vec<Child>,
     comparison_failure: Option<Failure>,
@@ -161,12 +163,14 @@ impl Tenka {
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
             file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
+            queue_jump: None,
             input_probes: jobs::probe_inputs(),
             file_column_fraction: 0.5,
             folder: None,
             format: OutputFormat::default(),
             mode: OptimizationMode::default(),
             folder_failure: None,
+            folder_request: None,
             worker: None,
             comparison_windows: Vec::new(),
             comparison_failure: None,
@@ -327,11 +331,15 @@ impl Tenka {
             });
     }
 
-    fn conversion_errors(&self, ui: &mut Ui, area: Rect) {
-        let errors = self.queue.iter().filter_map(|entry| match &entry.status {
-            Status::Done(Err(error)) => Some((entry.path.as_path(), error)),
-            _ => None,
-        });
+    fn conversion_errors(&mut self, ui: &mut Ui, area: Rect) {
+        let errors =
+            self.queue
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| match &entry.status {
+                    Status::Done(Err(error)) => Some((index, entry.path.as_path(), error)),
+                    _ => None,
+                });
         let count = errors.clone().count();
         if count == 0 {
             return;
@@ -349,16 +357,21 @@ impl Tenka {
                 },
             )
             .inner;
-        egui::Popup::from_toggle_button_response(&button)
+        let jump = egui::Popup::from_toggle_button_response(&button)
             .id(ui.make_persistent_id("conversion_errors_popup"))
             .align(egui::RectAlign::TOP_END)
             .gap(6.0)
             .frame(egui::Frame::popup(ui.style()).fill(ui.visuals().panel_fill))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| self.error_panel(ui, &errors.collect::<Vec<_>>()));
+            .show(|ui| self.error_panel(ui, &errors.collect::<Vec<_>>()))
+            .and_then(|response| response.inner);
+        if let Some(index) = jump {
+            self.queue_jump = Some(index);
+            ui.ctx().request_repaint();
+        }
     }
 
-    fn error_panel(&self, ui: &mut Ui, errors: &[(&Path, &Failure)]) {
+    fn error_panel(&self, ui: &mut Ui, errors: &[(usize, &Path, &Failure)]) -> Option<usize> {
         const WIDTH: f32 = 520.0;
         const FILE_WIDTH: f32 = 170.0;
         const ROW_HEIGHT: f32 = 28.0;
@@ -369,7 +382,7 @@ impl Tenka {
                 if icons::share(ui, self.label(125)).clicked() {
                     let text = errors
                         .iter()
-                        .map(|(path, error)| {
+                        .map(|(_, path, error)| {
                             format!("{}\t{}", file_name(path), self.error_description(error))
                         })
                         .collect::<Vec<_>>()
@@ -380,15 +393,33 @@ impl Tenka {
         });
         ui.separator();
         ui.spacing_mut().item_spacing.y = 0.0;
+        ui.style_mut().interaction.selectable_labels = false;
         ScrollArea::vertical()
             .max_height(224.0)
             .min_scrolled_height(0.0)
             .show_rows(ui, ROW_HEIGHT, errors.len(), |ui, rows| {
-                for (path, error) in &errors[rows] {
-                    let (row, _) = ui.allocate_exact_size(
+                let mut selected = None;
+                for &(index, path, error) in &errors[rows] {
+                    let (row, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), ROW_HEIGHT),
-                        egui::Sense::hover(),
+                        egui::Sense::click(),
                     );
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("{} · {}", file_name(path), self.error_summary(error)),
+                        )
+                    });
+                    if response.hovered() || response.has_focus() {
+                        ui.painter()
+                            .rect_filled(row, 0, ui.visuals().widgets.hovered.weak_bg_fill);
+                    }
+                    if response.clicked() {
+                        selected = Some(index);
+                        ui.close();
+                    }
                     let split = row.left() + FILE_WIDTH;
                     let file = Rect::from_x_y_ranges(row.left()..=split, row.y_range());
                     let reason = Rect::from_x_y_ranges(split..=row.right(), row.y_range());
@@ -398,7 +429,9 @@ impl Tenka {
                     });
                     queue_cell(ui, reason, |ui| self.show_error(ui, error));
                 }
-            });
+                selected
+            })
+            .inner
     }
 
     fn show_convert(&mut self, ui: &mut Ui) {
@@ -462,8 +495,10 @@ impl Tenka {
             .clicked()
         {
             self.queue.clear();
+            self.queue_jump = None;
             self.folder = None;
             self.folder_failure = None;
+            self.folder_request = None;
             ui.ctx().request_repaint();
         }
         if let Some(error) = &self.folder_failure {
@@ -516,6 +551,8 @@ impl Tenka {
         const HEADER_HEIGHT: f32 = 30.0;
         const ROW_HEIGHT: f32 = 42.0;
         const MIN_COLUMN_WIDTH: f32 = 100.0;
+        const ROW_ACTION_SIZE: egui::Vec2 = egui::vec2(28.0, 28.0);
+        const FOLDER_GAP: f32 = 6.0;
 
         let content_height = HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32;
         let (bounds, _) = ui.allocate_exact_size(
@@ -531,20 +568,32 @@ impl Tenka {
         if scrolls {
             table.max.x -= scroll_style.allocated_width();
         }
-        let output_end = table.width() * 0.9;
+        let action_width = (table.width() * 0.1).max(3.0 * ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP);
+        let output_end = table.width() - action_width;
         let min_width = MIN_COLUMN_WIDTH.min(output_end * 0.5);
         let file_width =
             (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
         let split = table.left() + file_width;
         let output_end_x = table.left() + output_end;
-        let preview_end = table.left() + table.width() * 0.95;
+        let output_start = split + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
+        let preview_start = output_end_x + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
+        let preview_end = (preview_start + table.right()) * 0.5;
         let column_rects = |row: Rect| {
             [
                 Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
-                Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
-                Rect::from_x_y_ranges(output_end_x..=preview_end, row.y_range()),
+                Rect::from_x_y_ranges(output_start..=output_end_x, row.y_range()),
+                Rect::from_x_y_ranges(preview_start..=preview_end, row.y_range()),
                 Rect::from_x_y_ranges(preview_end..=table.right(), row.y_range()),
             ]
+        };
+        let folder_rect = |boundary: f32, row: Rect| {
+            Rect::from_center_size(
+                egui::pos2(
+                    boundary + FOLDER_GAP + ROW_ACTION_SIZE.x * 0.5,
+                    row.center().y,
+                ),
+                ROW_ACTION_SIZE,
+            )
         };
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         let header = Rect::from_min_size(
@@ -561,12 +610,13 @@ impl Tenka {
         let body = Rect::from_min_max(header.left_bottom(), table.max);
         let mut remove = None;
         let mut compare = None;
-        let mut folder_failure = None;
+        let mut reveal_path = None;
+        let jump = self.queue_jump.take();
         let scroll_bounds = Rect::from_min_max(body.min, bounds.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(scroll_bounds), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.spacing_mut().scroll = scroll_style;
-            ScrollArea::vertical()
+            let mut scroll_area = ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(body.height())
                 .min_scrolled_height(0.0)
@@ -574,8 +624,18 @@ impl Tenka {
                     ScrollBarVisibility::AlwaysVisible
                 } else {
                     ScrollBarVisibility::AlwaysHidden
-                })
-                .show_rows(ui, ROW_HEIGHT, self.queue.len(), |ui, rows| {
+                });
+            if let Some(index) = jump {
+                let center = (index as f32 + 0.5) * ROW_HEIGHT;
+                let max_offset = (ROW_HEIGHT * self.queue.len() as f32 - body.height()).max(0.0);
+                let offset = (center - body.height() * 0.5).clamp(0.0, max_offset);
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+            scroll_area.id_salt("queue_rows").show_rows(
+                ui,
+                ROW_HEIGHT,
+                self.queue.len(),
+                |ui, rows| {
                     ui.set_clip_rect(ui.clip_rect().intersect(body));
                     for index in rows {
                         let entry = &self.queue[index];
@@ -603,15 +663,32 @@ impl Tenka {
                                     show_name(ui);
                                 }
                             });
+                            if ui
+                                .put(folder_rect(split, row), |ui: &mut Ui| {
+                                    icons::reveal_file(ui, self.label(134))
+                                })
+                                .clicked()
+                            {
+                                reveal_path = Some(entry.path.clone());
+                            }
                             queue_cell(ui, output, |ui| {
-                                self.show_output(ui, &entry.status, &mut folder_failure);
+                                self.show_output(ui, &entry.status, &mut reveal_path);
                             });
                             let conversion = match &entry.status {
                                 Status::Done(Ok(Some(result))) => Some(result),
                                 _ => None,
                             };
+                            if let Some(conversion) = conversion
+                                && ui
+                                    .put(folder_rect(output_end_x, row), |ui: &mut Ui| {
+                                        icons::reveal_file(ui, self.label(70))
+                                    })
+                                    .clicked()
+                            {
+                                reveal_path = Some(conversion.path.clone());
+                            }
                             let compare_rect =
-                                Rect::from_center_size(preview.center(), egui::vec2(28.0, 28.0));
+                                Rect::from_center_size(preview.center(), ROW_ACTION_SIZE);
                             if ui
                                 .put(compare_rect, |ui: &mut Ui| {
                                     icons::compare(ui, self.label(122), conversion.is_some())
@@ -622,7 +699,7 @@ impl Tenka {
                                 compare = Some([entry.path.clone(), conversion.path.clone()]);
                             }
                             let remove_rect =
-                                Rect::from_center_size(delete.center(), egui::vec2(28.0, 28.0));
+                                Rect::from_center_size(delete.center(), ROW_ACTION_SIZE);
                             if ui
                                 .put(remove_rect, |ui: &mut Ui| {
                                     remove_file_button(ui, self.label(121), !busy)
@@ -634,7 +711,8 @@ impl Tenka {
                             ui.painter().hline(row.x_range(), row.bottom(), stroke);
                         });
                     }
-                });
+                },
+            );
         });
         ui.painter()
             .rect_stroke(header, 0, stroke, egui::StrokeKind::Inside);
@@ -672,12 +750,13 @@ impl Tenka {
         if let Some(paths) = compare {
             self.open_comparison(&paths);
         }
-        if folder_failure.is_some() {
-            self.folder_failure = folder_failure;
+        if let Some(path) = reveal_path {
+            self.folder_failure = None;
+            self.folder_request = Some(jobs::reveal_file(ui.ctx(), path));
         }
     }
 
-    fn show_output(&self, ui: &mut Ui, status: &Status, folder_failure: &mut Option<Failure>) {
+    fn show_output(&self, ui: &mut Ui, status: &Status, reveal_path: &mut Option<PathBuf>) {
         match status {
             Status::Done(Ok(Some(result))) => {
                 let grew = result.bytes > result.source_bytes;
@@ -699,14 +778,7 @@ impl Tenka {
                     .on_hover_text(path_label(&result.path))
                     .context_menu(|ui| {
                         if ui.button(self.label(70)).clicked() {
-                            if let Some(parent) = result.path.parent()
-                                && let Err(error) = Command::new("xdg-open").arg(parent).spawn()
-                            {
-                                *folder_failure = Some(Failure {
-                                    label: 71,
-                                    detail: error.to_string(),
-                                });
-                            }
+                            *reveal_path = Some(result.path.clone());
                             ui.close();
                         }
                     });
@@ -875,6 +947,14 @@ impl eframe::App for Tenka {
         }
         self.system_theme.apply(context, self.theme);
         self.poll_worker();
+        if let Some(result) = self
+            .folder_request
+            .as_ref()
+            .and_then(|request| request.try_recv().ok())
+        {
+            self.folder_failure = result.err();
+            self.folder_request = None;
+        }
         self.add_files(self.file_drops.take(context));
         self.header(context);
         if !self.queue.is_empty() {
@@ -990,4 +1070,81 @@ fn file_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicking_an_error_scrolls_to_its_row_in_the_queue() {
+        use egui::{Event, FullOutput, Modifiers, PointerButton, Pos2, RawInput, Shape};
+
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.catalog = Catalog::new("en");
+        app.queue = (0..32)
+            .map(|index| QueueEntry {
+                path: PathBuf::from(format!("image-{index}.jpg")),
+                size: Arc::new(OnceLock::new()),
+                status: if index == 31 {
+                    Status::Done(Err(Failure {
+                        label: 51,
+                        detail: String::new(),
+                    }))
+                } else {
+                    Status::Pending
+                },
+            })
+            .collect();
+        let mut render = |events| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.footer(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_queue(ui, false));
+                },
+            )
+        };
+        let click = |pos| {
+            let button = |pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            vec![Event::PointerMoved(pos), button(true), button(false)]
+        };
+        let text_position = |output: &FullOutput, label: &str| {
+            output.shapes.iter().find_map(|shape| {
+                let Shape::Text(text) = &shape.shape else {
+                    return None;
+                };
+                let center = text.pos + text.galley.rect.center().to_vec2();
+                (text.galley.text() == label && shape.clip_rect.contains(center)).then_some(center)
+            })
+        };
+
+        let initial = render(Vec::new());
+        assert!(text_position(&initial, "image-31.jpg").is_none());
+        let toggle = initial
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Circle(circle) if circle.radius == 9.0 => Some(circle.center),
+                _ => None,
+            })
+            .unwrap();
+        render(click(toggle));
+        let popup = render(Vec::new());
+        let error = text_position(&popup, "[E51] Image exceeds input limits").unwrap();
+        render(click(error));
+        let queue = render(Vec::new());
+        assert!(text_position(&queue, "Conversion errors").is_none());
+        assert!(text_position(&queue, "image-31.jpg").is_some());
+    }
 }
