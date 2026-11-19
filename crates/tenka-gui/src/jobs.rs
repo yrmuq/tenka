@@ -33,6 +33,7 @@ pub struct TestResult {
     pub setting: Setting,
     pub bytes: usize,
     pub dimensions: (u32, u32),
+    pub resized: bool,
     pub quality: f64,
     pub milliseconds: f64,
     pub preview: ColorImage,
@@ -124,7 +125,7 @@ pub fn test_qualities(
         for quality in qualities {
             emit(Event::Tested(
                 quality,
-                test_one(&mut test, &file, folder.as_deref(), quality),
+                test_one(&mut test, &file, folder.as_deref(), quality, (width, height)),
             ));
         }
     })
@@ -189,6 +190,7 @@ fn test_one(
     file: &Path,
     folder: Option<&Path>,
     ceiling: u8,
+    source_dimensions: (u32, u32),
 ) -> Result<TestResult, Failure> {
     let start = Instant::now();
     let result = test.encode(ceiling)?;
@@ -206,6 +208,7 @@ fn test_one(
         setting: result.setting,
         bytes: result.bytes.len(),
         dimensions: result.dimensions,
+        resized: result.dimensions != source_dimensions,
         quality: result.quality,
         milliseconds,
         preview: ColorImage::from_rgba_unmultiplied(

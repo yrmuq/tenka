@@ -11,19 +11,21 @@ use crate::{
     parallel_runner, raster, round_trip,
 };
 
-/// Measures lossy test encodings and reuses their scores within a comparison series.
+/// Measures test encodings and reuses their scores within a comparison series.
 pub struct QualityTest<'a> {
     original: &'a RgbaImage,
     options: Options,
     runner: Option<ThreadsRunner<'static>>,
     reference: OnceCell<raster::QualityReference<'a>>,
-    probes: HashMap<(u32, u8), Option<Probe>>,
+    probes: HashMap<ProbeKey, Option<Probe>>,
 }
+
+type ProbeKey = (u32, Option<u8>);
 
 #[derive(Clone, Copy)]
 struct Probe {
     quality: f64,
-    bytes: usize,
+    bytes: Option<usize>,
 }
 
 impl<'a> QualityTest<'a> {
@@ -37,7 +39,8 @@ impl<'a> QualityTest<'a> {
         }
     }
 
-    /// Select the tested result with the highest similarity at or below the ceiling.
+    /// Select the closest measured result at or below the ceiling, using size
+    /// to break ties at the displayed precision.
     /// At 100%, encode the prepared pixels losslessly at the original resolution.
     pub fn encode(&mut self, ceiling: u8) -> Result<Output> {
         if !(1..=100).contains(&ceiling) {
@@ -54,56 +57,146 @@ impl<'a> QualityTest<'a> {
 
         let cap = f64::from(ceiling);
         let original_side = self.original.width().max(self.original.height());
-        let sides = std::iter::once(original_side).chain(
-            RESIZE_SCALES
-                .into_iter()
-                .filter(|_| self.options.auto_resize)
-                .map(|scale| (original_side * scale / 100).max(1)),
-        );
+        let mut sides = vec![original_side];
+        if self.options.auto_resize {
+            sides.extend(
+                RESIZE_SCALES
+                    .into_iter()
+                    .map(|scale| (original_side * scale / 100).max(1)),
+            );
+            sides.dedup();
+        }
+        for &side in &sides {
+            self.probe_side(side, original_side, cap)?;
+        }
+        for _ in 0..2 {
+            let intermediate = self.intermediate_sides(&sides, cap);
+            if intermediate.is_empty() {
+                break;
+            }
+            for &side in &intermediate {
+                self.probe_side(side, original_side, cap)?;
+            }
+            sides.extend(intermediate);
+            sides.sort_unstable();
+            sides.reverse();
+        }
+
+        self.encode_best(ceiling, lossless)
+    }
+
+    fn probe_side(&mut self, side: u32, original_side: u32, cap: f64) -> Result<()> {
+        let image = LazyCell::new(|| raster::limit_size(self.original, side));
         let reference = self
             .reference
             .get_or_init(|| raster::QualityReference::new(self.original));
-        let mut last_side = 0;
-        for side in sides {
-            if side == last_side {
-                continue;
-            }
-            last_side = side;
-            let image = LazyCell::new(|| raster::limit_size(self.original, side));
-            search_strengths(|strength| {
-                let result = match self.probes.entry((side, strength)) {
-                    Entry::Occupied(entry) => *entry.get(),
-                    Entry::Vacant(entry) => {
-                        let setting = lossy_setting(format, strength);
-                        let result = measure(&image, reference, setting, &self.runner)?;
-                        *entry.insert(result)
-                    }
-                };
-                Ok(result.is_some_and(|probe| probe.quality <= cap))
-            })?;
+        if side < original_side && let Entry::Vacant(entry) = self.probes.entry((side, None)) {
+            entry.insert(quality(&image, reference)?.map(|quality| Probe {
+                quality,
+                bytes: None,
+            }));
         }
+        search_strengths(|strength| {
+            let result = match self.probes.entry((side, Some(strength))) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let setting = lossy_setting(self.options.format, strength);
+                    let result = measure(&image, reference, setting, &self.runner)?;
+                    *entry.insert(result)
+                }
+            };
+            Ok(result.is_some_and(|probe| probe.quality <= cap))
+        })
+    }
 
-        let (&(side, strength), probe) = self
+    fn intermediate_sides(&self, sides: &[u32], cap: f64) -> Vec<u32> {
+        if sides.len() < 2 {
+            return Vec::new();
+        }
+        let closest_side = self
             .probes
             .iter()
-            .filter_map(|(key, probe)| probe.as_ref().map(|probe| (key, probe)))
-            .filter(|(_, probe)| probe.quality <= cap)
-            .max_by(|(key, a), (other_key, b)| {
-                a.quality
-                    .total_cmp(&b.quality)
-                    .then_with(|| b.bytes.cmp(&a.bytes))
-                    .then_with(|| key.cmp(other_key))
+            .filter_map(|(&(side, _), probe)| {
+                let probe = probe.as_ref()?;
+                (probe.quality <= cap && sides.contains(&side)).then_some((side, probe.quality))
             })
+            .max_by(|(a_side, a), (b_side, b)| a.total_cmp(b).then(a_side.cmp(b_side)))
+            .map(|(side, _)| side);
+        let resize_quality = |side| {
+            if side == sides[0] {
+                Some(100.0)
+            } else {
+                self.probes.get(&(side, None))?.map(|probe| probe.quality)
+            }
+        };
+        // Refine near the closest measured result and where resizing alone crosses the ceiling.
+        sides
+            .windows(2)
+            .filter_map(|pair| {
+                let (upper, lower) = (pair[0], pair[1]);
+                let crosses_ceiling = resize_quality(upper)
+                    .zip(resize_quality(lower))
+                    .is_some_and(|(a, b)| (a <= cap) != (b <= cap));
+                let near_best = Some(upper) == closest_side || Some(lower) == closest_side;
+                if upper - lower > 1 && (crosses_ceiling || near_best) {
+                    Some(u32::midpoint(upper, lower))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn encode_best(&mut self, ceiling: u8, lossless: Setting) -> Result<Output> {
+        let cap = f64::from(ceiling);
+        let score = self
+            .probes
+            .values()
+            .flatten()
+            .filter(|probe| probe.quality <= cap)
+            .map(|probe| displayed_tenths(probe.quality))
+            .max()
             .ok_or(Error::QualityCeiling(ceiling))?;
+        let mut best: Option<(ProbeKey, usize, f64)> = None;
+        for (&key, probe) in &mut self.probes {
+            let Some(probe) = probe else { continue };
+            if probe.quality > cap || displayed_tenths(probe.quality) != score {
+                continue;
+            }
+            // Resize-only candidates need encoding only when their score competes for first place.
+            let bytes = match probe.bytes {
+                Some(bytes) => bytes,
+                None => {
+                    let image = raster::limit_size(self.original, key.0);
+                    let bytes = lossless.encode(&image, &self.runner)?.len();
+                    probe.bytes = Some(bytes);
+                    bytes
+                }
+            };
+            if best.is_none_or(|(other_key, other_bytes, other_quality)| {
+                bytes
+                    .cmp(&other_bytes)
+                    .then_with(|| other_quality.total_cmp(&probe.quality))
+                    .then_with(|| other_key.cmp(&key))
+                    .is_lt()
+            }) {
+                best = Some((key, bytes, probe.quality));
+            }
+        }
+        let ((side, strength), _, quality) = best.ok_or(Error::QualityCeiling(ceiling))?;
         let image = raster::limit_size(self.original, side);
-        let setting = lossy_setting(format, strength);
+        let setting = strength.map_or(lossless, |value| lossy_setting(self.options.format, value));
         Ok(Output {
             bytes: setting.encode(&image, &self.runner)?,
             dimensions: image.dimensions(),
-            quality: probe.quality,
+            quality,
             setting,
         })
     }
+}
+
+fn displayed_tenths(quality: f64) -> u16 {
+    (quality * 10.0).round_ties_even() as u16
 }
 
 fn lossy_setting(format: OutputFormat, strength: u8) -> Setting {
@@ -152,13 +245,17 @@ fn measure(
     if !raster::alpha_equal(image, &decoded) {
         return Ok(None);
     }
-    Ok(reference
-        .compare(&decoded)?
-        .filter(|score| score.score.is_finite())
-        .map(|score| Probe {
-            quality: score.score.max(0.0),
-            bytes: bytes.len(),
+    Ok(quality(&decoded, reference)?.map(|quality| Probe {
+            quality,
+            bytes: Some(bytes.len()),
         }))
+}
+
+fn quality(image: &RgbaImage, reference: &raster::QualityReference<'_>) -> Result<Option<f64>> {
+    Ok(reference
+        .compare(image)?
+        .filter(|score| score.score.is_finite())
+        .map(|score| score.score.max(0.0)))
 }
 
 #[cfg(test)]
@@ -191,10 +288,10 @@ mod tests {
                     "{format:?} at {target}: {actual}"
                 );
                 assert!(
-                    test.probes
-                        .values()
-                        .flatten()
-                        .all(|probe| probe.quality > f64::from(target) || probe.quality <= actual)
+                    test.probes.values().flatten().all(|probe| {
+                        probe.quality > f64::from(target)
+                            || displayed_tenths(probe.quality) <= displayed_tenths(actual)
+                    })
                 );
             }
             let output = test.encode(100).unwrap();
@@ -202,5 +299,42 @@ mod tests {
             assert_eq!(output.quality, 100.0);
             assert_eq!(output.preview().unwrap(), source.0);
         }
+    }
+
+    #[test]
+    fn resize_only_can_win_on_size_at_the_same_displayed_quality() {
+        let source = Source(RgbaImage::from_fn(96, 64, |x, y| {
+            let edge = if (x / 3 + y / 5) % 2 == 0 { 32 } else { 224 };
+            Rgba([edge, x as u8, y as u8, 255])
+        }));
+        let format = OutputFormat::Webp;
+        let (lossless, _) = format.settings();
+        let mut test = source.quality_test(Options {
+            format,
+            auto_resize: true,
+        });
+        let width = 96;
+        let side = 48;
+        let resized = raster::limit_size(&source.0, side);
+        let reference = raster::QualityReference::new(&source.0);
+        let score = quality(&resized, &reference).unwrap().unwrap();
+        let ceiling = score.ceil().max(1.0) as u8;
+        assert!(ceiling < 100);
+        test.probe_side(side, width, f64::from(ceiling)).unwrap();
+        assert_eq!(test.probes[&(side, None)].unwrap().quality, score);
+        test.probes.retain(|key, _| *key == (side, None));
+        let bytes = lossless.encode(&resized, &test.runner).unwrap().len();
+        test.probes.insert(
+            (width, Some(12)),
+            Some(Probe {
+                quality: score,
+                bytes: Some(bytes + 1),
+            }),
+        );
+        let output = test.encode_best(ceiling, lossless).unwrap();
+        assert_eq!(output.setting, lossless);
+        assert_eq!(output.dimensions, (48, 32));
+        assert_eq!(output.quality, score);
+        assert_eq!(output.preview().unwrap(), *resized);
     }
 }

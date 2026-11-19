@@ -556,10 +556,14 @@ impl Tenka {
                                             format!("{} {value}", self.label(39))
                                         }
                                         Setting::JxlLossless | Setting::WebpLossless => {
-                                            self.label(17).into()
+                                            self.label(if result.resized { 106 } else { 17 }).into()
                                         }
                                     };
-                                    ui.label(setting);
+                                    ui.label(if result.resized && !result.setting.is_lossless() {
+                                        format!("{} + {setting}", self.label(106))
+                                    } else {
+                                        setting
+                                    });
                                     ui.label(size(result.bytes));
                                     ui.label(dimensions_text(result.dimensions));
                                     ui.label(format!("{:.1}%", result.quality));
