@@ -13,21 +13,22 @@ use crate::{
     file_name,
     jobs::{self, ComparisonPixels, Failure},
     language::Catalog,
-    native_options, path_label,
+    path_label,
     theme::SystemTheme,
 };
 
 pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Result {
     let catalog = Catalog::new(language);
     let title = format!("Tenka — {}", catalog.text(99));
-    let options = native_options(
-        egui::ViewportBuilder::default()
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka.compare")
             .with_icon(icon)
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([320.0, 240.0]),
-        false,
-    );
+        persist_window: false,
+        ..Default::default()
+    };
     eframe::run_native(
         &title,
         options,

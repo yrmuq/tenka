@@ -9,4 +9,5 @@
 - `crates/tenka-gui/src/language.rs` loads the English and Russian catalogs from `languages/`.
 - `crates/tenka-gui/src/theme.rs` follows system appearance through the Linux settings portal for both windows.
 - `crates/tenka-gui/src/icons.rs` draws the language and appearance controls in the conversion header.
+- `vendor/winit` supplies native Wayland file-drop events while eframe uses Winit 0.30.
 - `packaging/` builds the AppImage and update metadata. `.github/workflows/dev.yml` runs tests and updates the development draft.

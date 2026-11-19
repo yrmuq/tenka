@@ -15,4 +15,4 @@
 
 ## Compatibility Workarounds
 
-- Use XWayland for both windows when X11 is available because Winit 0.30 does not deliver native Wayland file drops. Remove the fallback when Winit supports native Wayland file drops.
+- Both windows accept file drops through native Wayland. Keep the Winit 0.30 file-drop backport until eframe supports native Wayland drops upstream.

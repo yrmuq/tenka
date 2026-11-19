@@ -58,7 +58,7 @@ Tenka saves only results that are smaller than the source and no larger than a f
 
 ### AppImage
 
-Download the x86_64 package from the [development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). Open the `.AppImage` with [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever). Linux desktop file dialogs use the desktop portal. X11 sessions require the system libxkbcommon-x11 library. The `.zsync` file supplies delta-update metadata for compatible update tools.
+Download the x86_64 package from the [development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). Open the `.AppImage` with [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever). Linux desktop file dialogs use the desktop portal. File drops work on native Wayland and X11. X11 sessions require the system libxkbcommon-x11 library. The `.zsync` file supplies delta-update metadata for compatible update tools.
 
 ### Flatpak
 
@@ -73,6 +73,7 @@ Tenka is distributed under the [GNU General Public License, version 3](LICENSE).
 | Component | Upstream | License | Integration Details |
 | --- | --- | --- | --- |
 | egui / eframe | [emilk/egui](https://github.com/emilk/egui) | `MIT OR Apache-2.0` | Desktop interface. |
+| Winit | [rust-windowing/winit](https://github.com/rust-windowing/winit) | `Apache-2.0` | Desktop windows with a [native Wayland file-drop backport](https://github.com/MixaDoDs/photocraft/commit/3f766332a7212f2a5fe5f6b3da7ee12e4ab2f05d). |
 | jpegxl-rs | [inflation/jpegxl-rs](https://github.com/inflation/jpegxl-rs) | `GPL-3.0-or-later` | Rust bindings for JPEG XL. |
 | libjxl | [libjxl/libjxl](https://github.com/libjxl/libjxl) | `BSD-3-Clause` | JPEG XL codec. |
 | libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP encoder for conversion and comparison. |

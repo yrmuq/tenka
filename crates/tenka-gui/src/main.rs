@@ -29,36 +29,19 @@ fn main() -> eframe::Result {
         let theme = parse_theme(args.next().as_deref());
         return comparison::run(icon, &language, theme);
     }
-    let options = native_options(
-        egui::ViewportBuilder::default()
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka")
             .with_icon(icon)
             .with_inner_size([960.0, 650.0])
             .with_min_inner_size([700.0, 490.0]),
-        true,
-    );
+        ..Default::default()
+    };
     eframe::run_native(
         "Tenka",
         options,
         Box::new(|context| Ok(Box::new(Tenka::new(context)))),
     )
-}
-
-fn native_options(viewport: egui::ViewportBuilder, persist_window: bool) -> eframe::NativeOptions {
-    eframe::NativeOptions {
-        viewport,
-        persist_window,
-        #[cfg(target_os = "linux")]
-        event_loop_builder: Some(Box::new(|builder| {
-            use winit::platform::x11::EventLoopBuilderExtX11;
-
-            // Winit 0.30 delivers file drops through X11, including under XWayland.
-            if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
-                builder.with_x11();
-            }
-        })),
-        ..Default::default()
-    }
 }
 
 enum Status {
@@ -169,8 +152,12 @@ impl Tenka {
                         };
                         let language_label = format!("{} · {language}", self.label(3));
                         if icons::globe(ui, &language_label).clicked() {
-                            self.language =
-                                if self.language == "en" { "system" } else { "en" }.into();
+                            self.language = if self.language == "en" {
+                                "system"
+                            } else {
+                                "en"
+                            }
+                            .into();
                             self.catalog = Catalog::new(&self.language);
                         }
                     });
