@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 
 use crate::{
+    add_images_prompt,
     file_drop::FileDrops,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
@@ -84,6 +85,18 @@ impl Comparison {
         }));
     }
 
+    fn pick_images(&mut self) {
+        if let Some(files) = rfd::FileDialog::new()
+            .add_filter(
+                "JPEG / PNG / WebP / JPEG XL",
+                &["jpg", "jpeg", "png", "webp", "jxl"],
+            )
+            .pick_files()
+        {
+            self.add(files);
+        }
+    }
+
     fn load_images(&mut self, context: &Context) {
         if let Some(receiver) = &self.loading {
             let entry = &mut self.images[self.next];
@@ -133,13 +146,11 @@ impl Comparison {
     fn show_images(&mut self, ui: &mut Ui) {
         let area = ui.max_rect();
         if self.images.is_empty() {
-            ui.painter().text(
-                area.center(),
-                Align2::CENTER_CENTER,
-                self.catalog.text(100),
-                FontId::proportional(15.0),
-                ui.visuals().weak_text_color(),
-            );
+            ui.add_space((ui.available_height() - 58.0).max(0.0) / 2.0);
+            if add_images_prompt(ui, &self.catalog, true) {
+                self.pick_images();
+                self.load_images(ui.ctx());
+            }
             return;
         }
 
@@ -273,21 +284,14 @@ impl eframe::App for Comparison {
         self.add(self.file_drops.take(context));
         egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(self.catalog.text(8)).clicked()
-                    && let Some(files) = rfd::FileDialog::new()
-                        .add_filter(
-                            "JPEG / PNG / WebP / JPEG XL",
-                            &["jpg", "jpeg", "png", "webp", "jxl"],
-                        )
-                        .pick_files()
-                {
-                    self.add(files);
-                }
                 if ui
                     .selectable_label(self.split, self.catalog.text(104))
                     .clicked()
                 {
                     self.split = !self.split;
+                }
+                if !self.images.is_empty() && add_images_prompt(ui, &self.catalog, true) {
+                    self.pick_images();
                 }
             });
         });

@@ -65,7 +65,7 @@ struct Tenka {
     catalog: Catalog,
     queue: Vec<QueueEntry>,
     folder: Option<PathBuf>,
-    conversion: Options,
+    format: OutputFormat,
     mode: OptimizationMode,
     folder_failure: Option<Failure>,
     worker: Option<Receiver<Event>>,
@@ -111,7 +111,7 @@ impl Tenka {
             file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
             folder: None,
-            conversion: Options::default(),
+            format: OutputFormat::default(),
             mode: OptimizationMode::default(),
             folder_failure: None,
             worker: None,
@@ -170,27 +170,10 @@ impl Tenka {
     }
 
     fn show_convert(&mut self, ui: &mut Ui) {
-        ui.heading(self.label(72));
         let busy = self.worker.is_some();
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, Button::new(self.label(8))).clicked()
-                && let Some(files) = self.picker().pick_files()
-            {
-                self.add_files(files);
-            }
-            if ui
-                .add_enabled(!busy && !self.queue.is_empty(), Button::new(self.label(23)))
-                .clicked()
-            {
-                self.queue.clear();
-            }
-        });
-        folder_picker(ui, &self.catalog, &mut self.folder, busy);
-
-        ui.add_space(6.0);
         section(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                format_picker(ui, self.label(73), &mut self.conversion.format);
+                format_picker(ui, self.label(73), &mut self.format);
                 ui.horizontal(|ui| {
                     ui.label(self.label(110));
                     for (mode, label, hint) in [
@@ -204,9 +187,6 @@ impl Tenka {
                             .on_hover_text(hint);
                     }
                 });
-                let resize = self.label(74);
-                ui.checkbox(&mut self.conversion.auto_resize, resize)
-                    .on_hover_text(self.label(75));
             });
         });
 
@@ -215,38 +195,87 @@ impl Tenka {
             .iter()
             .filter(|entry| matches!(entry.status, Status::Pending))
             .count();
-        ui.vertical_centered(|ui| {
-            if ui
-                .add_enabled(
-                    !busy && pending > 0,
-                    Button::new(self.label(22)).min_size([140.0, 27.0].into()),
-                )
-                .clicked()
-            {
-                self.folder_failure = None;
-                let entries = self
-                    .queue
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| {
-                        matches!(entry.status, Status::Pending)
-                            .then_some((index, entry.path.clone()))
+        let action_size = egui::vec2(140.0, 27.0);
+        let (actions, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), action_size.y),
+            egui::Sense::hover(),
+        );
+        let center = egui::Rect::from_center_size(actions.center(), action_size);
+        let offset = egui::vec2(action_size.x + ui.spacing().item_spacing.x, 0.0);
+        let destination = self
+            .folder
+            .as_deref()
+            .map(path_label)
+            .unwrap_or_else(|| self.label(10).into());
+        if ui
+            .put(center.translate(-offset), |ui: &mut Ui| {
+                ui.add_enabled(!busy, Button::new(self.label(9)))
+            })
+            .on_hover_text(destination)
+            .clicked()
+            && let Some(selected) = rfd::FileDialog::new().pick_folder()
+        {
+            self.folder = Some(selected);
+        }
+        if ui
+            .put(center, |ui: &mut Ui| {
+                ui.add_enabled(!busy && pending > 0, Button::new(self.label(22)))
+            })
+            .clicked()
+        {
+            self.folder_failure = None;
+            let entries = self
+                .queue
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    matches!(entry.status, Status::Pending).then_some((index, entry.path.clone()))
+                })
+                .collect();
+            self.worker = Some(jobs::convert(
+                ui.ctx(),
+                entries,
+                self.folder.clone(),
+                Options {
+                    format: self.format,
+                    auto_resize: false,
+                },
+                self.mode,
+            ));
+        }
+        if ui
+            .put(center.translate(offset), |ui: &mut Ui| {
+                ui.add_enabled(!busy && !self.queue.is_empty(), Button::new(self.label(23)))
+            })
+            .clicked()
+        {
+            self.queue.clear();
+        }
+        if self.folder.is_some() || busy || pending > 0 {
+            let (details, _) = ui.allocate_exact_size(
+                egui::vec2(actions.width(), 20.0),
+                egui::Sense::hover(),
+            );
+            let center =
+                egui::Rect::from_center_size(details.center(), egui::vec2(action_size.x, 20.0));
+            if self.folder.is_some()
+                && ui
+                    .put(center.translate(-offset), |ui: &mut Ui| {
+                        ui.add_enabled(!busy, Button::new(self.label(10)))
                     })
-                    .collect();
-                self.worker = Some(jobs::convert(
-                    ui.ctx(),
-                    entries,
-                    self.folder.clone(),
-                    self.conversion,
-                    self.mode,
-                ));
+                    .clicked()
+            {
+                self.folder = None;
             }
             if busy {
-                ui.spinner();
+                ui.put(center, egui::Spinner::new());
             } else if pending > 0 {
-                ui.weak(format!("{}  {pending}", self.label(68)));
+                ui.put(
+                    center,
+                    egui::Label::new(RichText::new(format!("{}  {pending}", self.label(68))).weak()),
+                );
             }
-        });
+        }
         if let Some(error) = &self.folder_failure {
             self.show_error(ui, error);
         }
@@ -255,11 +284,11 @@ impl Tenka {
         }
         ui.separator();
 
+        if add_images_prompt(ui, &self.catalog, !busy) && let Some(files) = self.picker().pick_files()
+        {
+            self.add_files(files);
+        }
         if self.queue.is_empty() {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new(self.label(11)).size(18.0));
-            });
             return;
         }
         let mut folder_failure = None;
@@ -458,31 +487,18 @@ fn theme_id(theme: ThemePreference) -> u16 {
     }
 }
 
-fn folder_picker(ui: &mut Ui, catalog: &Catalog, folder: &mut Option<PathBuf>, busy: bool) {
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!busy, Button::new(catalog.text(9)))
-            .on_hover_text(catalog.text(63))
-            .clicked()
-            && let Some(selected) = rfd::FileDialog::new().pick_folder()
-        {
-            *folder = Some(selected);
-        }
-        if let Some(selected) = folder {
-            if ui
-                .add_enabled(!busy, Button::new(catalog.text(10)))
-                .clicked()
-            {
-                *folder = None;
-            } else {
-                let path = path_label(selected);
-                ui.add(egui::Label::new(&path).truncate())
-                    .on_hover_text(path);
-            }
-        } else {
-            ui.weak(catalog.text(10));
-        }
-    });
+fn add_images_prompt(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
+    ui.vertical_centered(|ui| {
+        ui.label(catalog.text(11));
+        let response = ui.add_enabled(
+            enabled,
+            Button::new(RichText::new("+").size(20.0)).min_size(egui::vec2(34.0, 30.0)),
+        );
+        let label = catalog.text(8);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+        response.on_hover_text(label).clicked()
+    })
+    .inner
 }
 
 fn format_picker(ui: &mut Ui, label: &str, format: &mut OutputFormat) {

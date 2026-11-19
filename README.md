@@ -12,14 +12,14 @@
 
 ---
 
-Tenka is a Linux image optimizer. Its Rust engine automatically selects compression and optionally reduces resolution while keeping the saved image visually close to the original. The engine is a separate Rust library for reuse in desktop apps and container workloads.
+Tenka is a Linux image optimizer. It automatically selects compression to save smaller images while keeping them visually close to their originals. The engine is a separate Rust library for reuse in desktop apps and container workloads.
 
 ---
 
 ## Features
 
 - Batch conversion of still, 8-bit JPEG, PNG, and WebP images up to 36 megapixels to JPEG XL or WebP.
-- Best, Balance, and Cheap conversion modes with optional resolution reduction.
+- Best, Balance, and Cheap conversion modes that preserve image dimensions.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
 - Full-resolution image comparison with shared zoom and pan.
 - English and Russian interface with system, light, and dark themes.
@@ -31,13 +31,14 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 
 | Input | Action |
 | --- | --- |
-| Drop files or select **Add images** | Add source images to the conversion queue. |
+| Drop files or select **+** | Add source images to the conversion queue. |
 | **Output format** | Choose JPEG XL or WebP. |
 | **Mode** | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
-| Enable **Automatically reduce resolution** | Consider smaller dimensions while comparing visual similarity to the original. |
+| Select **Output folder** | Choose where to save converted images. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
+| Select **Clear list** | Remove all entries from the conversion queue. |
 | Right-click a size in **Output** | Open the folder containing the converted image. |
-| Select **Compare** | Drop files into the comparison window or select **Add images**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
+| Select **Compare** | Drop files into the comparison window or select **+**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
 

@@ -5,7 +5,7 @@
 ## Required Behavior
 
 - Keep the user's chosen output format throughout automatic conversion.
-- Keep input dimensions unless the user enables automatic resolution reduction.
+- Keep input dimensions in the desktop conversion window while automatic resolution reduction is hidden.
 - Keep original files and existing output files intact when saving conversions.
 - Limit saved outputs to the selected format's full-resolution lossless size and require each saved output to be strictly smaller than its source.
 - In Best mode, choose the highest similarity among eligible outputs, breaking ties in favor of the smaller file.
