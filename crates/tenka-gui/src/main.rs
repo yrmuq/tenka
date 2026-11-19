@@ -164,32 +164,53 @@ impl Tenka {
                             .into();
                             self.catalog = Catalog::new(&self.language);
                         }
+                        ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                            self.conversion_settings(ui);
+                        });
                     });
                 });
             });
     }
 
+    fn conversion_settings(&mut self, ui: &mut Ui) {
+        ComboBox::from_id_salt("output_format")
+            .selected_text(self.format.name())
+            .width(96.0)
+            .show_ui(ui, |ui| {
+                for format in OutputFormat::ALL {
+                    ui.selectable_value(&mut self.format, format, format.name());
+                }
+            })
+            .response
+            .on_hover_text(self.label(73));
+
+        let modes = [
+            (OptimizationMode::Best, 111, 114),
+            (OptimizationMode::Balance, 112, 115),
+            (OptimizationMode::Cheap, 113, 116),
+        ];
+        let selected = match self.mode {
+            OptimizationMode::Best => 111,
+            OptimizationMode::Balance => 112,
+            OptimizationMode::Cheap => 113,
+        };
+        ComboBox::from_id_salt("mode")
+            .selected_text(self.label(selected))
+            .width(96.0)
+            .show_ui(ui, |ui| {
+                for (mode, label, hint) in modes {
+                    let label = self.label(label);
+                    let hint = self.label(hint);
+                    ui.selectable_value(&mut self.mode, mode, label)
+                        .on_hover_text(hint);
+                }
+            })
+            .response
+            .on_hover_text(self.label(110));
+    }
+
     fn show_convert(&mut self, ui: &mut Ui) {
         let busy = self.worker.is_some();
-        section(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                format_picker(ui, self.label(73), &mut self.format);
-                ui.horizontal(|ui| {
-                    ui.label(self.label(110));
-                    for (mode, label, hint) in [
-                        (OptimizationMode::Best, 111, 114),
-                        (OptimizationMode::Balance, 112, 115),
-                        (OptimizationMode::Cheap, 113, 116),
-                    ] {
-                        let label = self.label(label);
-                        let hint = self.label(hint);
-                        ui.selectable_value(&mut self.mode, mode, label)
-                            .on_hover_text(hint);
-                    }
-                });
-            });
-        });
-
         let pending = self
             .queue
             .iter()
@@ -252,10 +273,8 @@ impl Tenka {
             self.queue.clear();
         }
         if self.folder.is_some() || busy || pending > 0 {
-            let (details, _) = ui.allocate_exact_size(
-                egui::vec2(actions.width(), 20.0),
-                egui::Sense::hover(),
-            );
+            let (details, _) =
+                ui.allocate_exact_size(egui::vec2(actions.width(), 20.0), egui::Sense::hover());
             let center =
                 egui::Rect::from_center_size(details.center(), egui::vec2(action_size.x, 20.0));
             if self.folder.is_some()
@@ -489,39 +508,33 @@ fn theme_id(theme: ThemePreference) -> u16 {
 
 fn add_images_prompt(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
     ui.vertical_centered(|ui| {
-        ui.label(catalog.text(11));
-        let response = ui.add_enabled(
-            enabled,
-            Button::new(RichText::new("+").size(20.0)).min_size(egui::vec2(34.0, 30.0)),
-        );
-        let label = catalog.text(8);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
-        response.on_hover_text(label).clicked()
+        let width = ui.available_width().min(240.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                egui::Frame::group(ui.style())
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(catalog.text(11));
+                        let response = ui.add_enabled(
+                            enabled,
+                            Button::new(RichText::new("+").size(20.0))
+                                .min_size(egui::vec2(34.0, 30.0)),
+                        );
+                        let label = catalog.text(8);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+                        });
+                        response.on_hover_text(label).clicked()
+                    })
+                    .inner
+            },
+        )
+        .inner
     })
     .inner
-}
-
-fn format_picker(ui: &mut Ui, label: &str, format: &mut OutputFormat) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ComboBox::from_id_salt("output_format")
-            .selected_text(format.name())
-            .width(164.0)
-            .show_ui(ui, |ui| {
-                for option in OutputFormat::ALL {
-                    ui.selectable_value(format, option, option.name());
-                }
-            });
-    });
-}
-
-fn section(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
-    egui::Frame::group(ui.style())
-        .inner_margin(12)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            contents(ui);
-        });
 }
 
 fn path_label(path: &Path) -> String {

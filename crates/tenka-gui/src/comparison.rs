@@ -146,7 +146,7 @@ impl Comparison {
     fn show_images(&mut self, ui: &mut Ui) {
         let area = ui.max_rect();
         if self.images.is_empty() {
-            ui.add_space((ui.available_height() - 58.0).max(0.0) / 2.0);
+            ui.add_space((ui.available_height() - 72.0).max(0.0) / 2.0);
             if add_images_prompt(ui, &self.catalog, true) {
                 self.pick_images();
                 self.load_images(ui.ctx());
