@@ -36,9 +36,9 @@ while queue:
     )
 
 for package in sorted((packages[id_] for id_ in visited), key=lambda p: (p["name"], p["version"])):
-    if package["source"] is None:
-        continue
     root = Path(package["manifest_path"]).parent
+    if package["source"] is None and not root.is_relative_to(Path(metadata["workspace_root"]) / "vendor"):
+        continue
     paths = (
         path
         for location in ["", *vendored.get(package["name"], [])]
