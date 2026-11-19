@@ -42,6 +42,22 @@ impl Catalog {
         let value = format!("{value:.1}").replace('.', self.text(120));
         format!("{value} {}", self.text(unit))
     }
+
+    pub(crate) fn duration(&self, seconds: u64) -> String {
+        if seconds < 60 {
+            return format!("{} {}", seconds.max(1), self.text(126));
+        }
+        let minutes = seconds.div_ceil(60);
+        if minutes < 60 {
+            return format!("{minutes} {}", self.text(127));
+        }
+        let hours = minutes / 60;
+        let minutes = minutes % 60;
+        if minutes == 0 {
+            return format!("{hours} {}", self.text(128));
+        }
+        format!("{hours} {} {minutes} {}", self.text(128), self.text(127))
+    }
 }
 
 fn entries(catalog: &'static str) -> impl Iterator<Item = (u16, &'static str, &'static str)> {

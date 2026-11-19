@@ -4,6 +4,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
@@ -11,7 +12,7 @@ use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Sourc
 
 pub enum Event {
     Started(usize),
-    Converted(usize, Result<Option<Conversion>, Failure>),
+    Converted(usize, Result<Option<Conversion>, Failure>, Duration),
     Finished,
 }
 
@@ -71,10 +72,9 @@ pub fn convert(
     run(context, move |emit| {
         for (idx, path) in files {
             emit(Event::Started(idx));
-            emit(Event::Converted(
-                idx,
-                convert_one(&path, output_folder.as_deref(), options, mode),
-            ));
+            let start = Instant::now();
+            let result = convert_one(&path, output_folder.as_deref(), options, mode);
+            emit(Event::Converted(idx, result, start.elapsed()));
         }
     })
 }

@@ -6,6 +6,7 @@ mod language;
 mod theme;
 
 use std::{
+    collections::VecDeque,
     ffi::OsStr,
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -15,6 +16,7 @@ use std::{
 
 use eframe::egui::{
     self, Button, ComboBox, Context, Rect, RichText, ScrollArea, ThemePreference, Ui,
+    scroll_area::ScrollBarVisibility,
 };
 use file_drop::FileDrops;
 use jobs::{Conversion, Event, Failure};
@@ -41,9 +43,18 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka")
-            .with_icon(icon)
-            .with_inner_size([960.0, 650.0])
-            .with_min_inner_size([700.0, 490.0]),
+            .with_icon(icon),
+        window_builder: Some(Box::new(|window| {
+            let size = [960.0, 650.0];
+            // Override the size and maximized state saved by resizable versions.
+            window
+                .with_inner_size(size)
+                .with_min_inner_size(size)
+                .with_max_inner_size(size)
+                .with_resizable(false)
+                .with_maximized(false)
+                .with_maximize_button(false)
+        })),
         ..Default::default()
     };
     eframe::run_native(
@@ -64,6 +75,30 @@ struct QueueEntry {
     status: Status,
 }
 
+struct Batch {
+    events: Receiver<Event>,
+    remaining: usize,
+    recent: VecDeque<Duration>,
+}
+
+impl Batch {
+    fn record(&mut self, elapsed: Duration) {
+        self.remaining -= 1;
+        if self.recent.len() == 10 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(elapsed);
+    }
+
+    fn estimate_seconds(&self) -> Option<u64> {
+        if self.remaining == 0 || self.recent.is_empty() {
+            return None;
+        }
+        let seconds: f64 = self.recent.iter().map(Duration::as_secs_f64).sum();
+        Some((seconds * self.remaining as f64 / self.recent.len() as f64).ceil() as u64)
+    }
+}
+
 struct Tenka {
     language: String,
     theme: ThemePreference,
@@ -76,7 +111,7 @@ struct Tenka {
     format: OutputFormat,
     mode: OptimizationMode,
     folder_failure: Option<Failure>,
-    worker: Option<Receiver<Event>>,
+    worker: Option<Batch>,
     comparison_windows: Vec<Child>,
     comparison_failure: Option<Failure>,
 }
@@ -226,15 +261,16 @@ impl Tenka {
     }
 
     fn footer(&mut self, context: &Context) {
+        const FOOTER_HEIGHT: f32 = ADD_IMAGES_SIZE.y + 12.0;
         egui::TopBottomPanel::bottom("queue_footer")
-            .exact_height(ADD_IMAGES_SIZE.y)
+            .exact_height(FOOTER_HEIGHT)
             .frame(
                 egui::Frame::side_top_panel(&context.style())
                     .inner_margin(egui::Margin::symmetric(20, 0)),
             )
             .show(context, |ui| {
                 let (strip, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), ADD_IMAGES_SIZE.y),
+                    egui::vec2(ui.available_width(), FOOTER_HEIGHT),
                     egui::Sense::hover(),
                 );
                 let busy = self.worker.is_some();
@@ -249,22 +285,104 @@ impl Tenka {
                     self.add_files(files);
                 }
                 let pending = self.pending_count();
-                if pending > 0 {
+                let estimate = self.worker.as_ref().and_then(Batch::estimate_seconds);
+                if pending > 0 || estimate.is_some() {
                     let left =
                         Rect::from_min_max(strip.min, egui::pos2(button.left(), strip.bottom()));
+                    let mut label = format!("{}  {pending}", self.label(68));
+                    if let Some(seconds) = estimate {
+                        label.push_str(&format!(" / ≈ {}", self.catalog.duration(seconds)));
+                    }
                     ui.scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(left)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| ui.weak(format!("{}  {pending}", self.label(68))),
+                        |ui| ui.weak(label),
                     );
                 }
+                let spinner = Rect::from_min_max(
+                    egui::pos2(strip.right() - ADD_IMAGES_SIZE.x, strip.top()),
+                    strip.max,
+                );
                 if busy {
-                    let right = Rect::from_min_max(
-                        egui::pos2(strip.right() - ADD_IMAGES_SIZE.x, strip.top()),
-                        strip.max,
+                    ui.put(spinner, egui::Spinner::new());
+                }
+                let error_area = Rect::from_min_max(
+                    egui::pos2(button.right(), strip.top()),
+                    egui::pos2(spinner.left() - 4.0, strip.bottom()),
+                );
+                self.conversion_errors(ui, error_area);
+            });
+    }
+
+    fn conversion_errors(&self, ui: &mut Ui, area: Rect) {
+        let errors = self.queue.iter().filter_map(|entry| match &entry.status {
+            Status::Done(Err(error)) => Some((entry.path.as_path(), error)),
+            _ => None,
+        });
+        let count = errors.clone().count();
+        if count == 0 {
+            return;
+        }
+        let button = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(area)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let button = icons::errors(ui, self.label(124));
+                    ui.colored_label(ui.visuals().error_fg_color, count.to_string());
+                    button
+                },
+            )
+            .inner;
+        egui::Popup::from_toggle_button_response(&button)
+            .align(egui::RectAlign::TOP_END)
+            .gap(6.0)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.error_panel(ui, &errors.collect::<Vec<_>>()));
+    }
+
+    fn error_panel(&self, ui: &mut Ui, errors: &[(&Path, &Failure)]) {
+        const WIDTH: f32 = 520.0;
+        const FILE_WIDTH: f32 = 170.0;
+        const ROW_HEIGHT: f32 = 28.0;
+        ui.set_width(WIDTH);
+        ui.horizontal(|ui| {
+            ui.strong(self.label(124));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::share(ui, self.label(125)).clicked() {
+                    let text = errors
+                        .iter()
+                        .map(|(path, error)| {
+                            format!("{}\t{}", file_name(path), self.error_description(error))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ui.ctx().copy_text(text);
+                }
+            });
+        });
+        ui.separator();
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ScrollArea::vertical()
+            .max_height(224.0)
+            .min_scrolled_height(0.0)
+            .show_rows(ui, ROW_HEIGHT, errors.len(), |ui, rows| {
+                for (path, error) in &errors[rows] {
+                    let (row, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), ROW_HEIGHT),
+                        egui::Sense::hover(),
                     );
-                    ui.put(right, egui::Spinner::new());
+                    let split = row.left() + FILE_WIDTH;
+                    let file = Rect::from_x_y_ranges(row.left()..=split, row.y_range());
+                    let reason = Rect::from_x_y_ranges(split..=row.right(), row.y_range());
+                    queue_cell(ui, file, |ui| {
+                        ui.add(egui::Label::new(file_name(path)).truncate())
+                            .on_hover_text(path_label(path));
+                    });
+                    queue_cell(ui, reason, |ui| self.show_error(ui, error));
                 }
             });
     }
@@ -284,15 +402,21 @@ impl Tenka {
             .as_deref()
             .map(path_label)
             .unwrap_or_else(|| self.label(10).into());
+        let output_label = self.folder.as_deref().map_or_else(
+            || self.label(9).into(),
+            |path| format!("↓ {}", file_name(path)),
+        );
         if ui
             .put(center.translate(-offset), |ui: &mut Ui| {
-                ui.add_enabled(!busy, Button::new(self.label(9)))
+                ui.add_enabled(!busy, Button::new(output_label).truncate())
             })
             .on_hover_text(destination)
             .clicked()
             && let Some(selected) = rfd::FileDialog::new().pick_folder()
         {
             self.folder = Some(selected);
+            self.folder_failure = None;
+            ui.ctx().request_repaint();
         }
         if ui
             .put(center, |ui: &mut Ui| {
@@ -308,41 +432,36 @@ impl Tenka {
                 .filter_map(|(index, entry)| {
                     matches!(entry.status, Status::Pending).then_some((index, entry.path.clone()))
                 })
-                .collect();
-            self.worker = Some(jobs::convert(
-                ui.ctx(),
-                entries,
-                self.folder.clone(),
-                Options {
-                    format: self.format,
-                    auto_resize: false,
-                },
-                self.mode,
-            ));
+                .collect::<Vec<_>>();
+            self.worker = Some(Batch {
+                remaining: entries.len(),
+                recent: VecDeque::new(),
+                events: jobs::convert(
+                    ui.ctx(),
+                    entries,
+                    self.folder.clone(),
+                    Options {
+                        format: self.format,
+                        auto_resize: false,
+                    },
+                    self.mode,
+                ),
+            });
         }
         let busy = self.worker.is_some();
         if ui
             .put(center.translate(offset), |ui: &mut Ui| {
-                ui.add_enabled(!busy && !self.queue.is_empty(), Button::new(self.label(23)))
+                ui.add_enabled(
+                    !busy && (!self.queue.is_empty() || self.folder.is_some()),
+                    Button::new(self.label(23)),
+                )
             })
             .clicked()
         {
             self.queue.clear();
+            self.folder = None;
+            self.folder_failure = None;
             ui.ctx().request_repaint();
-        }
-        if self.folder.is_some() {
-            let (details, _) =
-                ui.allocate_exact_size(egui::vec2(actions.width(), 20.0), egui::Sense::hover());
-            let center =
-                egui::Rect::from_center_size(details.center(), egui::vec2(action_size.x, 20.0));
-            if ui
-                .put(center.translate(-offset), |ui: &mut Ui| {
-                    ui.add_enabled(!busy, Button::new(self.label(10)))
-                })
-                .clicked()
-            {
-                self.folder = None;
-            }
         }
         if let Some(error) = &self.folder_failure {
             self.show_error(ui, error);
@@ -367,12 +486,20 @@ impl Tenka {
         const ROW_HEIGHT: f32 = 42.0;
         const MIN_COLUMN_WIDTH: f32 = 100.0;
 
-        let height =
-            (HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32).min(ui.available_height());
-        let (table, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
+        let content_height = HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32;
+        let (bounds, _) = ui.allocate_exact_size(
+            egui::vec2(
+                ui.available_width(),
+                content_height.min(ui.available_height()),
+            ),
             egui::Sense::hover(),
         );
+        let scroll_style = egui::style::ScrollStyle::solid();
+        let scrolls = content_height > bounds.height();
+        let mut table = bounds;
+        if scrolls {
+            table.max.x -= scroll_style.allocated_width();
+        }
         let output_end = table.width() * 0.9;
         let min_width = MIN_COLUMN_WIDTH.min(output_end * 0.5);
         let file_width =
@@ -404,13 +531,21 @@ impl Tenka {
         let mut remove = None;
         let mut compare = None;
         let mut folder_failure = None;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+        let scroll_bounds = Rect::from_min_max(body.min, bounds.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(scroll_bounds), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.spacing_mut().scroll.floating = true;
+            ui.spacing_mut().scroll = scroll_style;
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(body.height())
+                .min_scrolled_height(0.0)
+                .scroll_bar_visibility(if scrolls {
+                    ScrollBarVisibility::AlwaysVisible
+                } else {
+                    ScrollBarVisibility::AlwaysHidden
+                })
                 .show_rows(ui, ROW_HEIGHT, self.queue.len(), |ui, rows| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(body));
                     for index in rows {
                         let entry = &self.queue[index];
                         ui.push_id(index, |ui| {
@@ -563,11 +698,12 @@ impl Tenka {
     }
 
     fn poll_worker(&mut self) {
-        while let Some(worker) = &self.worker {
-            match worker.try_recv() {
+        while let Some(worker) = &mut self.worker {
+            match worker.events.try_recv() {
                 Ok(Event::Started(index)) => self.queue[index].status = Status::Running,
-                Ok(Event::Converted(index, result)) => {
-                    self.queue[index].status = Status::Done(result)
+                Ok(Event::Converted(index, result, elapsed)) => {
+                    self.queue[index].status = Status::Done(result);
+                    worker.record(elapsed);
                 }
                 Ok(Event::Finished) => self.worker = None,
                 Err(TryRecvError::Empty) => break,
@@ -630,11 +766,26 @@ impl Tenka {
     }
 
     fn show_error(&self, ui: &mut Ui, error: &Failure) {
-        let message = format!("[E{}] {}", error.label, self.label(error.label));
         ui.add(
-            egui::Label::new(RichText::new(&message).color(ui.visuals().error_fg_color)).truncate(),
+            egui::Label::new(
+                RichText::new(self.error_summary(error)).color(ui.visuals().error_fg_color),
+            )
+            .truncate(),
         )
-        .on_hover_text(format!("{message}\n{}", error.detail));
+        .on_hover_text(self.error_description(error));
+    }
+
+    fn error_summary(&self, error: &Failure) -> String {
+        format!("[E{}] {}", error.label, self.label(error.label))
+    }
+
+    fn error_description(&self, error: &Failure) -> String {
+        let summary = self.error_summary(error);
+        if error.detail.is_empty() {
+            summary
+        } else {
+            format!("{summary}\n{}", error.detail)
+        }
     }
 }
 
@@ -757,4 +908,29 @@ fn file_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_uses_up_to_ten_completed_files_from_this_batch() {
+        let (_, events) = std::sync::mpsc::channel();
+        let mut batch = Batch {
+            events,
+            remaining: 12,
+            recent: VecDeque::new(),
+        };
+        assert_eq!(batch.estimate_seconds(), None);
+        batch.record(Duration::from_secs(40));
+        assert_eq!(batch.estimate_seconds(), Some(440));
+
+        for _ in 0..10 {
+            batch.record(Duration::from_secs(2));
+        }
+        assert_eq!(batch.estimate_seconds(), Some(2));
+        batch.record(Duration::from_secs(2));
+        assert_eq!(batch.estimate_seconds(), None);
+    }
 }

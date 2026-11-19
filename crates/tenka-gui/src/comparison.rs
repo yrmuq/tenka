@@ -32,7 +32,8 @@ pub fn run(
             .with_app_id("io.github.yrmuq.tenka.compare")
             .with_icon(icon)
             .with_inner_size([1000.0, 680.0])
-            .with_min_inner_size([320.0, 240.0]),
+            .with_min_inner_size([320.0, 240.0])
+            .with_maximized(true),
         persist_window: false,
         ..Default::default()
     };

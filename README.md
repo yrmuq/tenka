@@ -34,9 +34,10 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Drop files or select **+** | Add source images to the conversion queue. The button moves from the drop area to the bottom bar when the queue has files. |
 | Format selector in the header | Choose JPEG XL or WebP. |
 | Mode selector in the header | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
-| Select **Output folder** | Choose where to save converted images. |
+| Select **Output** | Choose where to save converted images. The button displays the selected folder name. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
-| Select **Clear list** | Remove all entries from the conversion queue. |
+| Select **Clear** | Remove all entries from the conversion queue and reset the output folder. |
+| Select the red **!** in the footer | View conversion errors by file. Select the share icon to copy all errors. |
 | Select the red cross on a row | Remove that entry from the conversion queue. |
 | Select the split circle on a completed row | Compare the original on the left with the converted image on the right. |
 | Drag the divider between **File** and **Output** | Resize both columns. |
@@ -46,6 +47,8 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
 
 Tenka saves only results that are smaller than the source and no larger than a full-resolution lossless encode in the selected format. It compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
+
+During conversion, the footer estimates the remaining time from the last ten completed files in the current batch.
 
 </details>
 

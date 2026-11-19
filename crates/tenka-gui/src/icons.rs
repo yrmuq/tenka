@@ -1,6 +1,6 @@
 use eframe::egui::{
-    Align2, Button, Color32, FontId, Response, Shape, Stroke, ThemePreference, Ui, WidgetInfo,
-    WidgetType, vec2,
+    Align2, Button, Color32, FontId, Rect, Response, Shape, Stroke, ThemePreference, Ui,
+    WidgetInfo, WidgetType, vec2,
 };
 
 pub(crate) fn globe(ui: &mut Ui, label: &str) -> Response {
@@ -78,11 +78,44 @@ pub(crate) fn compare(ui: &mut Ui, label: &str, enabled: bool) -> Response {
     let center = response.rect.center();
     let radius = 7.5;
     let stroke = Stroke::new(1.3_f32, color);
+    ui.painter()
+        .with_clip_rect(Rect::from_min_max(
+            center - vec2(0.0, radius + 1.0),
+            center + vec2(radius + 1.0, radius + 1.0),
+        ))
+        .circle_filled(center, radius, color);
     ui.painter().circle_stroke(center, radius, stroke);
-    ui.painter().line_segment(
-        [center - vec2(0.0, radius), center + vec2(0.0, radius)],
-        stroke,
+    response
+}
+
+pub(crate) fn errors(ui: &mut Ui, label: &str) -> Response {
+    let response = icon_button(ui, label);
+    let center = response.rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(center, 9.0, ui.visuals().error_fg_color);
+    let mark = ui.visuals().panel_fill;
+    painter.line_segment(
+        [center + vec2(0.0, -4.0), center + vec2(0.0, 1.0)],
+        Stroke::new(1.7, mark),
     );
+    painter.circle_filled(center + vec2(0.0, 4.0), 1.0, mark);
+    response
+}
+
+pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {
+    let response = icon_button(ui, label);
+    let center = response.rect.center();
+    let left = center + vec2(-6.0, 0.0);
+    let top = center + vec2(6.0, -6.0);
+    let bottom = center + vec2(6.0, 6.0);
+    let painter = ui.painter();
+    let color = ui.visuals().text_color();
+    let stroke = Stroke::new(1.3, color);
+    painter.line_segment([left, top], stroke);
+    painter.line_segment([left, bottom], stroke);
+    for node in [left, top, bottom] {
+        painter.circle_filled(node, 2.5, color);
+    }
     response
 }
 
