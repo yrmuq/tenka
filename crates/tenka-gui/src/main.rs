@@ -387,13 +387,18 @@ impl Tenka {
                             }
                             let [file, output, delete] = column_rects(row);
                             queue_cell(ui, file, |ui| {
-                                ui.vertical(|ui| {
+                                let show_name = |ui: &mut Ui| {
                                     ui.add(egui::Label::new(file_name(&entry.path)).truncate())
                                         .on_hover_text(path_label(&entry.path));
-                                    if let Status::Done(Err(error)) = &entry.status {
+                                };
+                                if let Status::Done(Err(error)) = &entry.status {
+                                    ui.vertical(|ui| {
+                                        show_name(ui);
                                         self.show_error(ui, error);
-                                    }
-                                });
+                                    });
+                                } else {
+                                    show_name(ui);
+                                }
                             });
                             queue_cell(ui, output, |ui| {
                                 self.show_output(ui, &entry.status, &mut folder_failure);
