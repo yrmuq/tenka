@@ -129,7 +129,7 @@ impl Tenka {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
-                    ui.selectable_label(true, self.label(1));
+                    ui.label(RichText::new(self.label(1)).strong());
                     if ui.button(self.label(109)).clicked() {
                         self.open_comparison();
                     }
