@@ -10,7 +10,7 @@ use eframe::egui::{
 };
 
 use crate::{
-    add_images_prompt,
+    add_images_button, empty_drop_area,
     file_drop::FileDrops,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
@@ -146,8 +146,13 @@ impl Comparison {
     fn show_images(&mut self, ui: &mut Ui) {
         let area = ui.max_rect();
         if self.images.is_empty() {
-            ui.add_space((ui.available_height() - 72.0).max(0.0) / 2.0);
-            if add_images_prompt(ui, &self.catalog, true) {
+            let drop_area = area.shrink2(vec2(20.0, 15.0));
+            if ui
+                .scope_builder(egui::UiBuilder::new().max_rect(drop_area), |ui| {
+                    empty_drop_area(ui, &self.catalog, true)
+                })
+                .inner
+            {
                 self.pick_images();
                 self.load_images(ui.ctx());
             }
@@ -290,7 +295,7 @@ impl eframe::App for Comparison {
                 {
                     self.split = !self.split;
                 }
-                if !self.images.is_empty() && add_images_prompt(ui, &self.catalog, true) {
+                if !self.images.is_empty() && add_images_button(ui, &self.catalog, true) {
                     self.pick_images();
                 }
             });

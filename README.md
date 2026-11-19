@@ -37,6 +37,8 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Select **Output folder** | Choose where to save converted images. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
 | Select **Clear list** | Remove all entries from the conversion queue. |
+| Select the red cross on a row | Remove that entry from the conversion queue. |
+| Drag the divider between **File** and **Output** | Resize both columns. |
 | Right-click a size in **Output** | Open the folder containing the converted image. |
 | Select **Compare** | Drop files into the comparison window or select **+**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |

@@ -13,7 +13,7 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui,
+    self, Button, ComboBox, Context, Rect, RichText, ScrollArea, ThemePreference, Ui,
 };
 use file_drop::FileDrops;
 use jobs::{Conversion, Event, Failure};
@@ -64,6 +64,7 @@ struct Tenka {
     file_drops: FileDrops,
     catalog: Catalog,
     queue: Vec<QueueEntry>,
+    file_column_fraction: f32,
     folder: Option<PathBuf>,
     format: OutputFormat,
     mode: OptimizationMode,
@@ -110,6 +111,7 @@ impl Tenka {
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
             file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
+            file_column_fraction: 0.5,
             folder: None,
             format: OutputFormat::default(),
             mode: OptimizationMode::default(),
@@ -264,6 +266,7 @@ impl Tenka {
                 self.mode,
             ));
         }
+        let busy = self.worker.is_some();
         if ui
             .put(center.translate(offset), |ui: &mut Ui| {
                 ui.add_enabled(!busy && !self.queue.is_empty(), Button::new(self.label(23)))
@@ -305,72 +308,180 @@ impl Tenka {
         }
         ui.separator();
 
-        if add_images_prompt(ui, &self.catalog, !busy)
-            && let Some(files) = self.picker().pick_files()
-        {
+        let open_picker = if self.queue.is_empty() {
+            empty_drop_area(ui, &self.catalog, !busy)
+        } else {
+            ui.vertical_centered(|ui| add_images_button(ui, &self.catalog, !busy))
+                .inner
+        };
+        if open_picker && let Some(files) = self.picker().pick_files() {
+            let was_empty = self.queue.is_empty();
             self.add_files(files);
+            if was_empty {
+                ui.ctx().request_repaint();
+                return;
+            }
         }
         if self.queue.is_empty() {
             return;
         }
+        self.show_queue(ui, busy);
+    }
+
+    fn show_queue(&mut self, ui: &mut Ui, busy: bool) {
+        const HEADER_HEIGHT: f32 = 30.0;
+        const ROW_HEIGHT: f32 = 42.0;
+        const MIN_COLUMN_WIDTH: f32 = 100.0;
+
+        let height =
+            (HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32).min(ui.available_height());
+        let (table, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        let output_end = table.width() * 0.9;
+        let min_width = MIN_COLUMN_WIDTH.min(output_end * 0.5);
+        let file_width =
+            (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
+        let split = table.left() + file_width;
+        let output_end_x = table.left() + output_end;
+        let column_rects = |row: Rect| {
+            [
+                Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
+                Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
+                Rect::from_x_y_ranges(output_end_x..=row.right(), row.y_range()),
+            ]
+        };
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        let header = Rect::from_min_size(
+            table.min,
+            egui::vec2(table.width(), HEADER_HEIGHT.min(table.height())),
+        );
+        ui.painter()
+            .rect_filled(header, 0, ui.visuals().faint_bg_color);
+        for (cell, title) in column_rects(header).into_iter().zip([28, 76]) {
+            queue_cell(ui, cell, |ui| {
+                ui.strong(self.label(title));
+            });
+        }
+        let body = Rect::from_min_max(header.left_bottom(), table.max);
+        let mut remove = None;
         let mut folder_failure = None;
-        ScrollArea::vertical().show(ui, |ui| {
-            Grid::new("files")
-                .num_columns(2)
-                .striped(true)
-                .min_col_width(145.0)
-                .show(ui, |ui| {
-                    for id in [28, 76] {
-                        ui.strong(self.label(id));
-                    }
-                    ui.end_row();
-                    for entry in &self.queue {
-                        ui.vertical(|ui| {
-                            ui.add(egui::Label::new(file_name(&entry.path)).truncate())
-                                .on_hover_text(path_label(&entry.path));
-                            if let Status::Done(Err(error)) = &entry.status {
-                                self.show_error(ui, error);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.spacing_mut().scroll.floating = true;
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(body.height())
+                .show_rows(ui, ROW_HEIGHT, self.queue.len(), |ui, rows| {
+                    for index in rows {
+                        let entry = &self.queue[index];
+                        ui.push_id(index, |ui| {
+                            let (row, _) = ui.allocate_exact_size(
+                                egui::vec2(body.width(), ROW_HEIGHT),
+                                egui::Sense::hover(),
+                            );
+                            if index % 2 == 1 {
+                                ui.painter()
+                                    .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
-                        });
-                        match &entry.status {
-                            Status::Done(Ok(Some(result))) => {
-                                ui.add(
-                                    egui::Label::new(format!(
-                                        "{} -> {}",
-                                        self.catalog.file_size(result.source_bytes),
-                                        self.catalog.file_size(result.bytes),
-                                    ))
-                                    .sense(egui::Sense::click()),
-                                )
-                                .on_hover_text(path_label(&result.path))
-                                .context_menu(|ui| {
-                                    if ui.button(self.label(70)).clicked() {
-                                        if let Some(parent) = result.path.parent()
-                                            && let Err(error) =
-                                                Command::new("xdg-open").arg(parent).spawn()
-                                        {
-                                            folder_failure = Some(Failure {
-                                                label: 71,
-                                                detail: error.to_string(),
-                                            });
-                                        }
-                                        ui.close();
+                            let [file, output, delete] = column_rects(row);
+                            queue_cell(ui, file, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.add(egui::Label::new(file_name(&entry.path)).truncate())
+                                        .on_hover_text(path_label(&entry.path));
+                                    if let Status::Done(Err(error)) = &entry.status {
+                                        self.show_error(ui, error);
                                     }
                                 });
+                            });
+                            queue_cell(ui, output, |ui| {
+                                self.show_output(ui, &entry.status, &mut folder_failure);
+                            });
+                            let remove_rect =
+                                Rect::from_center_size(delete.center(), egui::vec2(28.0, 28.0));
+                            if ui
+                                .put(remove_rect, |ui: &mut Ui| {
+                                    remove_file_button(ui, self.label(121), !busy)
+                                })
+                                .clicked()
+                            {
+                                remove = Some(index);
                             }
-                            Status::Done(Ok(None)) => {
-                                ui.weak("—").on_hover_text(self.label(107));
-                            }
-                            _ => {
-                                ui.weak("—");
-                            }
-                        }
-                        ui.end_row();
+                            ui.painter().hline(row.x_range(), row.bottom(), stroke);
+                        });
                     }
                 });
         });
+        ui.painter()
+            .rect_stroke(table, 0, stroke, egui::StrokeKind::Inside);
+        ui.painter().hline(table.x_range(), header.bottom(), stroke);
+        ui.painter().vline(output_end_x, table.y_range(), stroke);
+        let divider = ui
+            .interact(
+                Rect::from_center_size(
+                    egui::pos2(split, table.center().y),
+                    egui::vec2(10.0, table.height()),
+                ),
+                ui.id().with("queue_column_divider"),
+                egui::Sense::drag(),
+            )
+            .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
+        let divider_stroke = if divider.hovered() || divider.dragged() {
+            ui.visuals().widgets.hovered.fg_stroke
+        } else {
+            stroke
+        };
+        ui.painter().vline(split, table.y_range(), divider_stroke);
+        if divider.dragged() {
+            self.file_column_fraction = (file_width + divider.drag_delta().x)
+                .clamp(min_width, output_end - min_width)
+                / table.width();
+            ui.ctx().request_repaint();
+        }
+        // The current batch addresses its entries by index. Only remove rows after it completes.
+        if let Some(index) = remove {
+            self.queue.remove(index);
+            ui.ctx().request_repaint();
+        }
         if folder_failure.is_some() {
             self.folder_failure = folder_failure;
+        }
+    }
+
+    fn show_output(&self, ui: &mut Ui, status: &Status, folder_failure: &mut Option<Failure>) {
+        match status {
+            Status::Done(Ok(Some(result))) => {
+                ui.add(
+                    egui::Label::new(format!(
+                        "{} -> {}",
+                        self.catalog.file_size(result.source_bytes),
+                        self.catalog.file_size(result.bytes),
+                    ))
+                    .truncate()
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_text(path_label(&result.path))
+                .context_menu(|ui| {
+                    if ui.button(self.label(70)).clicked() {
+                        if let Some(parent) = result.path.parent()
+                            && let Err(error) = Command::new("xdg-open").arg(parent).spawn()
+                        {
+                            *folder_failure = Some(Failure {
+                                label: 71,
+                                detail: error.to_string(),
+                            });
+                        }
+                        ui.close();
+                    }
+                });
+            }
+            Status::Done(Ok(None)) => {
+                ui.weak("—").on_hover_text(self.label(107));
+            }
+            _ => {
+                ui.weak("—");
+            }
         }
     }
 
@@ -456,11 +567,11 @@ impl Tenka {
     }
 
     fn show_error(&self, ui: &mut Ui, error: &Failure) {
-        ui.colored_label(
-            ui.visuals().error_fg_color,
-            format!("[E{}] {}", error.label, self.label(error.label)),
+        let message = format!("[E{}] {}", error.label, self.label(error.label));
+        ui.add(
+            egui::Label::new(RichText::new(&message).color(ui.visuals().error_fg_color)).truncate(),
         )
-        .on_hover_text(&error.detail);
+        .on_hover_text(format!("{message}\n{}", error.detail));
     }
 }
 
@@ -509,35 +620,63 @@ fn theme_id(theme: ThemePreference) -> u16 {
     }
 }
 
-fn add_images_prompt(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
-    ui.vertical_centered(|ui| {
-        let width = ui.available_width().min(240.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, 0.0),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| {
-                egui::Frame::group(ui.style())
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.label(catalog.text(11));
-                        let response = ui.add_enabled(
-                            enabled,
-                            Button::new(RichText::new("+").size(20.0))
-                                .min_size(egui::vec2(34.0, 30.0)),
-                        );
-                        let label = catalog.text(8);
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
-                        });
-                        response.on_hover_text(label).clicked()
-                    })
-                    .inner
-            },
-        )
-        .inner
-    })
+fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
+    let (area, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+    ui.painter().rect_stroke(
+        area,
+        0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(area)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+        |ui| {
+            ui.add_space(((area.height() - 54.0) * 0.5).max(0.0));
+            ui.label(catalog.text(11));
+            add_images_button(ui, catalog, enabled)
+        },
+    )
     .inner
+}
+
+fn add_images_button(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
+    let response = ui.add_enabled(
+        enabled,
+        Button::new(RichText::new("+").size(20.0)).min_size(egui::vec2(34.0, 30.0)),
+    );
+    let label = catalog.text(8);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.on_hover_text(label).clicked()
+}
+
+fn queue_cell(ui: &mut Ui, cell: Rect, contents: impl FnOnce(&mut Ui)) {
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(cell.shrink2(egui::vec2(8.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.set_clip_rect(ui.clip_rect().intersect(cell));
+            contents(ui);
+        },
+    );
+}
+
+fn remove_file_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
+    let response = ui.add_enabled(enabled, Button::new("").frame_when_inactive(false));
+    let center = response.rect.center();
+    let mut color = ui.visuals().error_fg_color;
+    if !enabled {
+        color = color.gamma_multiply(0.45);
+    }
+    let stroke = egui::Stroke::new(1.8_f32, color);
+    for offset in [egui::vec2(5.0, 5.0), egui::vec2(5.0, -5.0)] {
+        ui.painter()
+            .line_segment([center - offset, center + offset], stroke);
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.on_hover_text(label)
 }
 
 fn path_label(path: &Path) -> String {
