@@ -4,11 +4,12 @@ use image::{
     DynamicImage, ImageDecoder, ImageFormat, Limits, Rgba, Rgba32FImage, RgbaImage,
     codecs::{jpeg::JpegDecoder, png::PngDecoder, webp::WebPDecoder},
     imageops::{FilterType, crop_imm, resize},
+    metadata::Orientation,
 };
 use moxcms::{ColorProfile, DataColorSpace, Layout};
 use ssimulacra2::{ColorPrimaries, Rgb, TransferCharacteristic, compute_frame_ssimulacra2};
 
-use crate::{Error, MAX_PIXELS, MAX_SIDE, Result};
+use crate::{Error, MAX_PIXELS, MAX_REVERSIBLE_JPEG_PIXELS, MAX_SIDE, Result};
 
 pub fn decode(bytes: &[u8]) -> Result<RgbaImage> {
     let reader = Cursor::new(bytes);
@@ -59,10 +60,31 @@ fn decode_still(mut decoder: impl ImageDecoder) -> Result<RgbaImage> {
 }
 
 pub fn check_dimensions(width: u32, height: u32) -> Result<()> {
-    if width.max(height) > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
+    check_dimension_limits(width, height, MAX_PIXELS)
+}
+
+pub fn check_dimension_limits(width: u32, height: u32, max_pixels: u64) -> Result<()> {
+    if width.min(height) == 0
+        || width.max(height) > MAX_SIDE
+        || u64::from(width) * u64::from(height) > max_pixels
+    {
         return Err(Error::Limits);
     }
     Ok(())
+}
+
+pub fn reversible_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    let mut decoder = JpegDecoder::new(Cursor::new(bytes))?;
+    let (width, height) = decoder.dimensions();
+    // Bound the coefficient buffers allocated by libjxl before invoking the encoder.
+    check_dimension_limits(width, height, MAX_REVERSIBLE_JPEG_PIXELS)?;
+    Ok(match decoder.orientation()? {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => (height, width),
+        _ => (width, height),
+    })
 }
 
 pub fn to_srgb(image: DynamicImage, icc: &[u8]) -> Result<RgbaImage> {

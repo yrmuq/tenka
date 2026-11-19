@@ -19,9 +19,10 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 ## Features
 
 - Batch conversion of still, 8-bit JPEG, PNG, and WebP images up to 36 megapixels to JPEG XL or WebP.
+- Reversible JPEG-to-JPEG XL transcoding up to 80 megapixels, with byte-for-byte JPEG reconstruction.
 - Best, Balance, and Cheap conversion modes that preserve image dimensions.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
-- Full-resolution image comparison with shared zoom and pan.
+- Full-resolution image comparison up to 36 megapixels with shared zoom and pan.
 - English and Russian interface with system, light, and dark themes.
 
 ---

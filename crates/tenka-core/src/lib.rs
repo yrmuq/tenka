@@ -22,6 +22,7 @@ use thiserror::Error;
 
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 36_000_000;
+const MAX_REVERSIBLE_JPEG_PIXELS: u64 = 80_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
 const PERCEPTUAL_QUALITY: f64 = 80.0;
@@ -50,6 +51,8 @@ pub enum Error {
     Decode(#[source] image::ImageError),
     #[error("JPEG XL encoding failed")]
     JxlEncode(#[from] jpegxl_rs::EncodeError),
+    #[error("Reversible JPEG to JPEG XL transcoding failed")]
+    JxlTranscode(#[source] jpegxl_rs::EncodeError),
     #[error("JPEG XL decoding failed")]
     JxlDecode(#[from] jpegxl_rs::DecodeError),
     #[error("WebP encoding failed")]
@@ -167,6 +170,7 @@ impl Output {
 pub enum Setting {
     Jxl(f32),
     JxlLossless,
+    JxlReversible,
     Webp(f32),
     WebpLossless,
 }
@@ -174,13 +178,16 @@ pub enum Setting {
 impl Setting {
     pub fn format(self) -> OutputFormat {
         match self {
-            Self::Jxl(_) | Self::JxlLossless => OutputFormat::JpegXl,
+            Self::Jxl(_) | Self::JxlLossless | Self::JxlReversible => OutputFormat::JpegXl,
             Self::Webp(_) | Self::WebpLossless => OutputFormat::Webp,
         }
     }
 
     pub fn is_lossless(self) -> bool {
-        matches!(self, Self::JxlLossless | Self::WebpLossless)
+        matches!(
+            self,
+            Self::JxlLossless | Self::JxlReversible | Self::WebpLossless
+        )
     }
 
     fn encode(self, image: &RgbaImage, runner: &Option<ThreadsRunner<'_>>) -> Result<Vec<u8>> {
@@ -198,6 +205,10 @@ impl Setting {
     }
 
     fn decode(self, bytes: &[u8], runner: &Option<ThreadsRunner<'_>>) -> Result<RgbaImage> {
+        if self == Self::JxlReversible {
+            let normalize = jxl_header::needs_color_conversion(bytes)?;
+            return decode_jxl(bytes, runner, normalize);
+        }
         match self.format() {
             OutputFormat::JpegXl => decode_jxl(bytes, runner, false),
             OutputFormat::Webp => image::load_from_memory_with_format(bytes, ImageFormat::WebP)
@@ -242,16 +253,60 @@ pub fn decode_for_comparison(bytes: &[u8]) -> Result<RgbaImage> {
     }
 }
 
+/// Optimize encoded input, including reversible JPEG-to-JPEG XL transcoding.
+/// Returns the original display dimensions and the selected output, if any.
+pub fn optimize_for_conversion(
+    bytes: &[u8],
+    options: Options,
+    mode: OptimizationMode,
+    cancelled: &AtomicBool,
+) -> Result<((u32, u32), Option<Output>)> {
+    check_cancelled(Some(cancelled))?;
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(Error::Limits);
+    }
+    let reversible = if options.format == OutputFormat::JpegXl
+        && image::guess_format(bytes).is_ok_and(|format| format == ImageFormat::Jpeg)
+    {
+        let dimensions = raster::reversible_jpeg_dimensions(bytes)?;
+        let encoded = encode_reversible_jpeg(bytes, dimensions);
+        check_cancelled(Some(cancelled))?;
+        if raster::check_dimensions(dimensions.0, dimensions.1).is_err() {
+            return Ok((dimensions, Some(encoded?)));
+        }
+        encoded.ok()
+    } else {
+        None
+    };
+
+    let source = Source::decode(bytes)?;
+    let output = source.optimize_inner(
+        options,
+        bytes.len(),
+        mode,
+        options.format == OutputFormat::JpegXl,
+        Some(cancelled),
+        reversible,
+    )?;
+    Ok((source.dimensions(), output))
+}
+
 pub struct Source(RgbaImage);
 
 impl Source {
     /// Read the dimensions of a supported input without decoding its pixels.
-    pub fn probe_dimensions(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
-        let size = imagesize::reader_size(reader).ok()?;
+    pub fn probe_dimensions(mut reader: impl BufRead + Seek) -> Option<(u32, u32)> {
+        let format = imagesize::reader_type(&mut reader).ok()?;
+        let size = format.reader_size(&mut reader).ok()?;
         let width = u32::try_from(size.width).ok()?;
         let height = u32::try_from(size.height).ok()?;
-        raster::check_dimensions(width, height).ok()?;
-        (width != 0 && height != 0).then_some((width, height))
+        let max_pixels = if format == imagesize::ImageType::Jpeg {
+            MAX_REVERSIBLE_JPEG_PIXELS
+        } else {
+            MAX_PIXELS
+        };
+        raster::check_dimension_limits(width, height, max_pixels).ok()?;
+        Some((width, height))
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
@@ -285,7 +340,7 @@ impl Source {
         source_bytes: usize,
         mode: OptimizationMode,
     ) -> Result<Option<Output>> {
-        self.optimize_inner(options, source_bytes, mode, false, None)
+        self.optimize_inner(options, source_bytes, mode, false, None, None)
     }
 
     /// Prefer an output smaller than the source. For JPEG XL, fall back to the smallest
@@ -303,6 +358,7 @@ impl Source {
             mode,
             options.format == OutputFormat::JpegXl,
             Some(cancelled),
+            None,
         )
     }
 
@@ -313,6 +369,7 @@ impl Source {
         mode: OptimizationMode,
         jpeg_xl_fallback: bool,
         cancelled: Option<&AtomicBool>,
+        reversible: Option<Output>,
     ) -> Result<Option<Output>> {
         let detailed = mode != OptimizationMode::Best;
         let mut search = Search {
@@ -329,7 +386,12 @@ impl Source {
         search.check_cancelled()?;
         let runner = parallel_runner();
         let lossless = options.format.lossless_setting();
-        let baseline = encode_output(&self.0, 100.0, lossless, &runner)?;
+        let pixel_lossless = encode_output(&self.0, 100.0, lossless, &runner);
+        let baseline = match (pixel_lossless, reversible) {
+            (Ok(pixels), Some(jpeg)) if jpeg.bytes.len() <= pixels.bytes.len() => jpeg,
+            (Err(_), Some(jpeg)) => jpeg,
+            (pixels, _) => pixels?,
+        };
         search.check_cancelled()?;
         search.max_bytes = output_budget(source_bytes, baseline.bytes.len());
         let fits = baseline.bytes.len() <= search.max_bytes;
@@ -342,7 +404,9 @@ impl Source {
                 candidates.push(Candidate::from(&output));
             })?;
             if let Some(candidate) = economical_candidate(&candidates, mode) {
-                if candidate.setting == lossless && candidate.dimensions == self.dimensions() {
+                if candidate.setting == baseline.setting
+                    && candidate.dimensions == self.dimensions()
+                {
                     return Ok(Some(baseline));
                 }
                 search.check_cancelled()?;
@@ -577,14 +641,15 @@ struct Search<'a> {
 
 impl Search<'_> {
     fn check_cancelled(self) -> Result<()> {
-        if self
-            .cancelled
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
-            return Err(Error::Cancelled);
-        }
-        Ok(())
+        check_cancelled(self.cancelled)
     }
+}
+
+fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
 }
 
 fn probe_compression(
@@ -646,6 +711,23 @@ fn parallel_runner() -> Option<ThreadsRunner<'static>> {
         .map_or(1, usize::from)
         .min(4);
     ThreadsRunner::new(None, Some(workers))
+}
+
+fn encode_reversible_jpeg(bytes: &[u8], dimensions: (u32, u32)) -> Result<Output> {
+    let runner = parallel_runner();
+    let encoded = encoder_builder()
+        .use_container(true)
+        .uses_original_profile(true)
+        .maybe_parallel_runner(runner.as_ref().map(|runner| runner as &dyn ParallelRunner))
+        .build()
+        .and_then(|mut encoder| encoder.encode_jpeg(bytes))
+        .map_err(Error::JxlTranscode)?;
+    Ok(Output {
+        bytes: encoded.data,
+        dimensions,
+        quality: 100.0,
+        setting: Setting::JxlReversible,
+    })
 }
 
 fn encode_jxl(
@@ -760,6 +842,45 @@ mod tests {
             assert_eq!(optimized.bytes.len(), baseline.bytes.len());
             assert!(source.optimize(options, 1).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn jpeg_conversion_can_preserve_the_original_jpeg_and_orientation() {
+        use image::{ImageEncoder, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
+        use jpegxl_rs::decode::Data;
+
+        let pixels = RgbImage::from_fn(128, 96, |x, y| {
+            Rgb([(x * 19 + y * 11) as u8, (y * 13) as u8, (x * y) as u8])
+        });
+        let mut input = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut input, 95);
+        // Little-endian EXIF with orientation 6 (rotate 90 degrees clockwise).
+        encoder
+            .set_exif_metadata(
+                b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0".to_vec(),
+            )
+            .unwrap();
+        encoder.encode_image(&pixels).unwrap();
+
+        let (dimensions, output) = optimize_for_conversion(
+            &input,
+            Options::default(),
+            OptimizationMode::Best,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let output = output.unwrap();
+        assert_eq!(dimensions, (96, 128));
+        assert_eq!(output.dimensions, dimensions);
+        assert_eq!(output.quality, 100.0);
+        assert!(output.bytes.len() < input.len());
+        assert_eq!(output.preview().unwrap().dimensions(), dimensions);
+        let (_, reconstructed) = decoder_builder()
+            .build()
+            .unwrap()
+            .reconstruct(&output.bytes)
+            .unwrap();
+        assert!(matches!(reconstructed, Data::Jpeg(bytes) if bytes == input));
     }
 
     #[test]

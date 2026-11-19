@@ -64,6 +64,7 @@ impl From<tenka_core::Error> for Failure {
             Options => 53,
             Decode(_) => 54,
             JxlEncode(_) => 55,
+            JxlTranscode(_) => 132,
             JxlDecode(_) => 56,
             WebpEncode => 57,
             Measurement => 58,
@@ -225,17 +226,12 @@ fn convert_one(
         return Ok(Break(()));
     }
     let bytes = input?;
-    let source = Source::decode(&bytes);
-    if cancelled.load(Ordering::Relaxed) {
-        return Ok(Break(()));
-    }
-    let source = source?;
-    let (width, height) = source.dimensions();
-    let output = source.optimize_for_conversion(options, bytes.len(), mode, cancelled);
+    let output = tenka_core::optimize_for_conversion(&bytes, options, mode, cancelled);
     if cancelled.load(Ordering::Relaxed) || matches!(output, Err(tenka_core::Error::Cancelled)) {
         return Ok(Break(()));
     }
-    let output = match output? {
+    let ((width, height), output) = output?;
+    let output = match output {
         Some(output) => Some(Conversion {
             path: save_image(path, folder, output.setting.format(), &output.bytes)?,
             source_bytes: bytes.len(),
