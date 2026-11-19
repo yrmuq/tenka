@@ -22,7 +22,7 @@ use thiserror::Error;
 
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 36_000_000;
-const MAX_REVERSIBLE_JPEG_PIXELS: u64 = 80_000_000;
+const MAX_JPEG_XL_PIXELS: u64 = 80_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
 const PERCEPTUAL_QUALITY: f64 = 80.0;
@@ -265,21 +265,34 @@ pub fn optimize_for_conversion(
     if bytes.len() as u64 > MAX_INPUT_BYTES {
         return Err(Error::Limits);
     }
-    let reversible = if options.format == OutputFormat::JpegXl
+    let (source, reversible) = if options.format == OutputFormat::JpegXl
         && image::guess_format(bytes).is_ok_and(|format| format == ImageFormat::Jpeg)
     {
         let dimensions = raster::reversible_jpeg_dimensions(bytes)?;
         let encoded = encode_reversible_jpeg(bytes, dimensions);
         check_cancelled(Some(cancelled))?;
-        if raster::check_dimensions(dimensions.0, dimensions.1).is_err() {
+        let large = raster::check_dimensions(dimensions.0, dimensions.1).is_err();
+        if large && mode == OptimizationMode::Best {
             return Ok((dimensions, Some(encoded?)));
         }
-        encoded.ok()
+        let source = if large {
+            match raster::decode_large_jpeg(bytes) {
+                Ok(image) => Source(image),
+                Err(error) => {
+                    check_cancelled(Some(cancelled))?;
+                    return encoded
+                        .map(|output| (dimensions, Some(output)))
+                        .or(Err(error));
+                }
+            }
+        } else {
+            Source::decode(bytes)?
+        };
+        (source, encoded.ok())
     } else {
-        None
+        (Source::decode(bytes)?, None)
     };
 
-    let source = Source::decode(bytes)?;
     let output = source.optimize_inner(
         options,
         bytes.len(),
@@ -301,7 +314,7 @@ impl Source {
         let width = u32::try_from(size.width).ok()?;
         let height = u32::try_from(size.height).ok()?;
         let max_pixels = if format == imagesize::ImageType::Jpeg {
-            MAX_REVERSIBLE_JPEG_PIXELS
+            MAX_JPEG_XL_PIXELS
         } else {
             MAX_PIXELS
         };
@@ -385,12 +398,18 @@ impl Source {
         };
         search.check_cancelled()?;
         let runner = parallel_runner();
-        let lossless = options.format.lossless_setting();
-        let pixel_lossless = encode_output(&self.0, 100.0, lossless, &runner);
-        let baseline = match (pixel_lossless, reversible) {
-            (Ok(pixels), Some(jpeg)) if jpeg.bytes.len() <= pixels.bytes.len() => jpeg,
-            (Err(_), Some(jpeg)) => jpeg,
-            (pixels, _) => pixels?,
+        let (width, height) = self.dimensions();
+        let baseline = match reversible {
+            Some(jpeg) if raster::check_dimensions(width, height).is_err() => jpeg,
+            reversible => {
+                let lossless = options.format.lossless_setting();
+                let pixel_lossless = encode_output(&self.0, 100.0, lossless, &runner);
+                match (pixel_lossless, reversible) {
+                    (Ok(pixels), Some(jpeg)) if jpeg.bytes.len() <= pixels.bytes.len() => jpeg,
+                    (Err(_), Some(jpeg)) => jpeg,
+                    (pixels, _) => pixels?,
+                }
+            }
         };
         search.check_cancelled()?;
         search.max_bytes = output_budget(source_bytes, baseline.bytes.len());
@@ -495,7 +514,11 @@ impl Source {
     ) -> Result<()> {
         search.check_cancelled()?;
         let lossless = options.format.lossless_setting();
-        let lossy = options.format.compression_settings(search.detailed);
+        let mut lossy = options.format.compression_settings(search.detailed);
+        let (width, height) = self.dimensions();
+        if search.detailed && raster::check_dimensions(width, height).is_err() {
+            lossy.splice(..0, [Setting::Jxl(0.15), Setting::Jxl(0.25)]);
+        }
         let reference = raster::QualityReference::new(&self.0);
         probe_compression(&self.0, &reference, search, &lossy, runner, &mut visit)?;
 

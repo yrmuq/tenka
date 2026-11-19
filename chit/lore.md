@@ -8,7 +8,7 @@
 - Keep input dimensions in the desktop conversion window while automatic resolution reduction is hidden.
 - Keep original files and existing output files intact when saving conversions.
 - Limit saved outputs to the selected format's full-resolution lossless size.
-- Include reversible JPEG transcoding in the JPEG XL size and quality search, and use it alone above the raster pixel limit to avoid full-size pixel and measurement buffers.
+- Use reversible transcoding alone for large JPEG-to-JPEG XL jobs in Best mode, and keep it as the lossless fallback when Balance or Cheap tests lossy encodes.
 - If desktop conversion finds no smaller JPEG XL, save the smallest tested JPEG XL that meets the selected mode's quality checks and flag any size increase.
 - Require each saved WebP to be strictly smaller than its source.
 - In Best mode, choose the highest similarity among smaller outputs, breaking ties in favor of the smaller file.

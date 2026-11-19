@@ -1,7 +1,8 @@
 use std::{borrow::Cow, io::Cursor};
 
 use image::{
-    DynamicImage, ImageDecoder, ImageFormat, Limits, Rgba, Rgba32FImage, RgbaImage,
+    DynamicImage, GenericImageView, ImageDecoder, ImageFormat, Limits, Rgba, Rgba32FImage,
+    RgbaImage,
     codecs::{jpeg::JpegDecoder, png::PngDecoder, webp::WebPDecoder},
     imageops::{FilterType, crop_imm, resize},
     metadata::Orientation,
@@ -9,14 +10,14 @@ use image::{
 use moxcms::{ColorProfile, DataColorSpace, Layout};
 use ssimulacra2::{ColorPrimaries, Rgb, TransferCharacteristic, compute_frame_ssimulacra2};
 
-use crate::{Error, MAX_PIXELS, MAX_REVERSIBLE_JPEG_PIXELS, MAX_SIDE, Result};
+use crate::{Error, MAX_JPEG_XL_PIXELS, MAX_PIXELS, MAX_SIDE, Result};
 
 pub fn decode(bytes: &[u8]) -> Result<RgbaImage> {
     let reader = Cursor::new(bytes);
     match image::guess_format(bytes) {
         Ok(ImageFormat::Jpeg) => decode_still(JpegDecoder::new(reader)?),
         Ok(ImageFormat::Png) => {
-            let decoder = PngDecoder::with_limits(reader, limits())?;
+            let decoder = PngDecoder::with_limits(reader, limits(MAX_PIXELS))?;
             if decoder.is_apng()? {
                 return Err(Error::Animation);
             }
@@ -33,18 +34,26 @@ pub fn decode(bytes: &[u8]) -> Result<RgbaImage> {
     }
 }
 
-fn limits() -> Limits {
+pub fn decode_large_jpeg(bytes: &[u8]) -> Result<RgbaImage> {
+    decode_with_limit(JpegDecoder::new(Cursor::new(bytes))?, MAX_JPEG_XL_PIXELS)
+}
+
+fn limits(max_pixels: u64) -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_SIDE);
     limits.max_image_height = Some(MAX_SIDE);
-    limits.max_alloc = Some(MAX_PIXELS * 12);
+    limits.max_alloc = Some(max_pixels * 12);
     limits
 }
 
-fn decode_still(mut decoder: impl ImageDecoder) -> Result<RgbaImage> {
-    decoder.set_limits(limits())?;
+fn decode_still(decoder: impl ImageDecoder) -> Result<RgbaImage> {
+    decode_with_limit(decoder, MAX_PIXELS)
+}
+
+fn decode_with_limit(mut decoder: impl ImageDecoder, max_pixels: u64) -> Result<RgbaImage> {
+    decoder.set_limits(limits(max_pixels))?;
     let (width, height) = decoder.dimensions();
-    check_dimensions(width, height)?;
+    check_dimension_limits(width, height, max_pixels)?;
     let color = decoder.color_type();
     if color.bits_per_pixel() / u16::from(color.channel_count()) != 8 {
         return Err(Error::BitDepth);
@@ -77,7 +86,7 @@ pub fn reversible_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     let mut decoder = JpegDecoder::new(Cursor::new(bytes))?;
     let (width, height) = decoder.dimensions();
     // Bound the coefficient buffers allocated by libjxl before invoking the encoder.
-    check_dimension_limits(width, height, MAX_REVERSIBLE_JPEG_PIXELS)?;
+    check_dimension_limits(width, height, MAX_JPEG_XL_PIXELS)?;
     Ok(match decoder.orientation()? {
         Orientation::Rotate90
         | Orientation::Rotate270
@@ -129,13 +138,40 @@ fn resize_to(image: &RgbaImage, (width, height): (u32, u32)) -> Cow<'_, RgbaImag
     }
 
     let linear = linear_table();
-    let premultiplied = Rgba32FImage::from_fn(image.width(), image.height(), |x, y| {
-        Rgba(to_linear(*image.get_pixel(x, y), &linear))
-    });
-    let resized = resize(&premultiplied, width, height, FilterType::Lanczos3);
+    let resized = if check_dimensions(image.width(), image.height()).is_err() {
+        // Keep the same filter without allocating a full-resolution float buffer.
+        resize(
+            &LinearRgba { image, linear },
+            width,
+            height,
+            FilterType::Lanczos3,
+        )
+    } else {
+        let premultiplied = Rgba32FImage::from_fn(image.width(), image.height(), |x, y| {
+            Rgba(to_linear(*image.get_pixel(x, y), &linear))
+        });
+        resize(&premultiplied, width, height, FilterType::Lanczos3)
+    };
     Cow::Owned(RgbaImage::from_fn(width, height, |x, y| {
         from_linear(resized.get_pixel(x, y).0)
     }))
+}
+
+struct LinearRgba<'a> {
+    image: &'a RgbaImage,
+    linear: [f32; 256],
+}
+
+impl GenericImageView for LinearRgba<'_> {
+    type Pixel = Rgba<f32>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        self.image.dimensions()
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        Rgba(to_linear(*self.image.get_pixel(x, y), &self.linear))
+    }
 }
 
 fn linear_table() -> [f32; 256] {
@@ -351,4 +387,24 @@ fn score(source: &RgbaImage, output: &RgbaImage) -> Result<f64> {
         rating = rating.min(light);
     }
     Ok(rating)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazy_linear_resize_matches_resizing_a_full_float_buffer() {
+        let image = RgbaImage::from_fn(24, 32, |x, y| {
+            Rgba([(x * 9) as u8, (y * 7) as u8, 70, (x * 3 + y * 2) as u8])
+        });
+        let view = LinearRgba {
+            image: &image,
+            linear: linear_table(),
+        };
+        let buffer = Rgba32FImage::from_fn(24, 32, |x, y| view.get_pixel(x, y));
+        let lazy = resize(&view, 9, 12, FilterType::Lanczos3);
+        let eager = resize(&buffer, 9, 12, FilterType::Lanczos3);
+        assert_eq!(lazy, eager);
+    }
 }
