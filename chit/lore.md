@@ -7,8 +7,10 @@
 - Keep the user's chosen output format throughout automatic conversion.
 - Keep input dimensions in the desktop conversion window while automatic resolution reduction is hidden.
 - Keep original files and existing output files intact when saving conversions.
-- Limit saved outputs to the selected format's full-resolution lossless size and require each saved output to be strictly smaller than its source.
-- In Best mode, choose the highest similarity among eligible outputs, breaking ties in favor of the smaller file.
+- Limit saved outputs to the selected format's full-resolution lossless size.
+- If desktop conversion finds no smaller JPEG XL, save the smallest tested JPEG XL that meets the selected mode's quality checks and flag any size increase.
+- Require each saved WebP to be strictly smaller than its source.
+- In Best mode, choose the highest similarity among smaller outputs, breaking ties in favor of the smaller file.
 - Judge compression and resizing against the same original at a common scale so that the search accounts for detail lost during resizing.
 - Keep the comparison window's zoom and pan tied to the same relative image coordinates at every rendered resolution.
 - In Split mode, draw every image into one shared frame and clip each image to its assigned region.

@@ -36,6 +36,7 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Mode selector in the header | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
 | Select **Output** | Choose where to save converted images. The button displays the selected folder name. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
+| Select **Cancel** during conversion | Stop the batch. Select **Convert** to continue with the pending files. |
 | Select **Clear** | Remove all entries from the conversion queue and reset the output folder. |
 | Select the red **!** in the footer | View conversion errors by file. Select the share icon to copy all errors. |
 | Select the red cross on a row | Remove that entry from the conversion queue. |
@@ -46,7 +47,7 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
 
-Tenka saves only results that are smaller than the source and no larger than a full-resolution lossless encode in the selected format. It compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
+Tenka looks for results smaller than the source and caps the output at the full-resolution lossless size. If no smaller JPEG XL meets the mode's quality checks, it saves the smallest acceptable tested JPEG XL and marks any size increase next to the output size. WebP conversion skips files without a smaller result. Tenka compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 
 During conversion, the footer estimates the remaining time from the last ten completed files in the current batch.
 

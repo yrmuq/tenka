@@ -2,8 +2,13 @@ use std::{
     ffi::OsString,
     fs::{self, File},
     io::{self, Read, Write},
+    ops::ControlFlow::{self, Break, Continue},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
@@ -13,6 +18,7 @@ use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Sourc
 pub enum Event {
     Started(usize),
     Converted(usize, Result<Option<Conversion>, Failure>, Duration),
+    Interrupted(usize),
     Finished,
 }
 
@@ -37,6 +43,7 @@ impl From<tenka_core::Error> for Failure {
     fn from(error: tenka_core::Error) -> Self {
         use tenka_core::Error::*;
         let label = match error {
+            Cancelled => 131,
             Format => 48,
             Animation => 49,
             BitDepth => 50,
@@ -68,12 +75,24 @@ pub fn convert(
     output_folder: Option<PathBuf>,
     options: Options,
     mode: OptimizationMode,
+    cancelled: Arc<AtomicBool>,
 ) -> Receiver<Event> {
     run(context, move |emit| {
         for (idx, path) in files {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
             emit(Event::Started(idx));
             let start = Instant::now();
-            let result = convert_one(&path, output_folder.as_deref(), options, mode);
+            let result =
+                match convert_one(&path, output_folder.as_deref(), options, mode, &cancelled) {
+                    Ok(Continue(result)) => Ok(result),
+                    Ok(Break(())) => {
+                        emit(Event::Interrupted(idx));
+                        break;
+                    }
+                    Err(error) => Err(error),
+                };
             emit(Event::Converted(idx, result, start.elapsed()));
         }
     })
@@ -153,18 +172,30 @@ fn convert_one(
     folder: Option<&Path>,
     options: Options,
     mode: OptimizationMode,
-) -> Result<Option<Conversion>, Failure> {
-    let bytes = read_image(path)?;
-    let source = Source::decode(&bytes)?;
-    let Some(output) = source.optimize_with_mode(options, bytes.len(), mode)? else {
-        return Ok(None);
+    cancelled: &AtomicBool,
+) -> Result<ControlFlow<(), Option<Conversion>>, Failure> {
+    let input = read_image(path);
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(Break(()));
+    }
+    let bytes = input?;
+    let source = Source::decode(&bytes);
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(Break(()));
+    }
+    let output = source?.optimize_for_conversion(options, bytes.len(), mode, cancelled);
+    if cancelled.load(Ordering::Relaxed) || matches!(output, Err(tenka_core::Error::Cancelled)) {
+        return Ok(Break(()));
+    }
+    let Some(output) = output? else {
+        return Ok(Continue(None));
     };
     let path = save_image(path, folder, output.setting.format(), &output.bytes)?;
-    Ok(Some(Conversion {
+    Ok(Continue(Some(Conversion {
         path,
         source_bytes: bytes.len(),
         bytes: output.bytes.len(),
-    }))
+    })))
 }
 
 fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {

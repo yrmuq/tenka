@@ -1,7 +1,9 @@
 use eframe::egui::{
-    Align2, Atom, Button, Color32, FontId, Rect, Response, Shape, Stroke, ThemePreference, Ui,
-    WidgetInfo, WidgetType, vec2,
+    Align2, Atom, Button, Color32, FontId, Rect, Response, Sense, Shape, Stroke, ThemePreference,
+    Ui, Vec2, WidgetInfo, WidgetType, vec2,
 };
+
+pub(crate) const INFO_SIZE: Vec2 = vec2(16.0, 16.0);
 
 pub(crate) fn globe(ui: &mut Ui, label: &str) -> Response {
     let response = icon_button(ui, label);
@@ -100,6 +102,21 @@ pub(crate) fn errors(ui: &mut Ui, label: &str) -> Response {
     );
     painter.circle_filled(center + vec2(0.0, 4.0), 1.0, mark);
     response
+}
+
+pub(crate) fn info(ui: &mut Ui, label: &str) {
+    let (rect, response) = ui.allocate_exact_size(INFO_SIZE, Sense::hover());
+    let center = rect.center();
+    ui.painter()
+        .circle_filled(center, 7.0, ui.visuals().text_color());
+    ui.painter().text(
+        center,
+        Align2::CENTER_CENTER,
+        "i",
+        FontId::proportional(11.0),
+        ui.visuals().panel_fill,
+    );
+    response.on_hover_text(label);
 }
 
 pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {

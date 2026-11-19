@@ -3,7 +3,10 @@
 mod jxl_header;
 mod raster;
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use jpegxl_rs::{
@@ -26,6 +29,8 @@ const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Conversion cancelled")]
+    Cancelled,
     #[error("Only JPEG, PNG and WebP input is supported")]
     Format,
     #[error("Animated images are unsupported")]
@@ -270,47 +275,80 @@ impl Source {
         source_bytes: usize,
         mode: OptimizationMode,
     ) -> Result<Option<Output>> {
+        self.optimize_inner(options, source_bytes, mode, false, None)
+    }
+
+    /// Prefer an output smaller than the source. For JPEG XL, fall back to the smallest
+    /// tested output that meets the mode's quality checks. Cancellation is cooperative.
+    pub fn optimize_for_conversion(
+        &self,
+        options: Options,
+        source_bytes: usize,
+        mode: OptimizationMode,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<Output>> {
+        self.optimize_inner(
+            options,
+            source_bytes,
+            mode,
+            options.format == OutputFormat::JpegXl,
+            Some(cancelled),
+        )
+    }
+
+    fn optimize_inner(
+        &self,
+        options: Options,
+        source_bytes: usize,
+        mode: OptimizationMode,
+        jpeg_xl_fallback: bool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Option<Output>> {
+        let detailed = mode != OptimizationMode::Best;
+        let mut search = Search {
+            min_quality: if detailed {
+                PERCEPTUAL_QUALITY
+            } else {
+                f64::from(DEFAULT_QUALITY)
+            },
+            max_bytes: usize::MAX,
+            detailed,
+            exhaustive: false,
+            cancelled,
+        };
+        search.check_cancelled()?;
         let runner = parallel_runner();
         let lossless = options.format.lossless_setting();
         let baseline = encode_output(&self.0, 100.0, lossless, &runner)?;
-        let max_bytes = output_budget(source_bytes, baseline.bytes.len());
-        let baseline = (baseline.bytes.len() <= max_bytes).then_some(baseline);
-        if mode != OptimizationMode::Best {
+        search.check_cancelled()?;
+        search.max_bytes = output_budget(source_bytes, baseline.bytes.len());
+        let fits = baseline.bytes.len() <= search.max_bytes;
+        let smaller = if detailed {
             let mut candidates = Vec::new();
-            if let Some(output) = &baseline {
-                candidates.push(Candidate::from(output));
+            if fits {
+                candidates.push(Candidate::from(&baseline));
             }
-            self.visit_candidates(
-                options,
-                PERCEPTUAL_QUALITY,
-                max_bytes,
-                true,
-                &runner,
-                |output| candidates.push(Candidate::from(&output)),
-            )?;
-            let Some(candidate) = economical_candidate(&candidates, mode) else {
-                return Ok(None);
-            };
-            if candidate.setting == lossless && candidate.dimensions == self.dimensions() {
-                return Ok(baseline);
+            self.visit_candidates(options, search, &runner, |output| {
+                candidates.push(Candidate::from(&output));
+            })?;
+            if let Some(candidate) = economical_candidate(&candidates, mode) {
+                if candidate.setting == lossless && candidate.dimensions == self.dimensions() {
+                    return Ok(Some(baseline));
+                }
+                search.check_cancelled()?;
+                let (width, height) = candidate.dimensions;
+                let image = raster::limit_size(&self.0, width.max(height));
+                let output = encode_output(&image, candidate.quality, candidate.setting, &runner)?;
+                (output.bytes.len() <= search.max_bytes).then_some(output)
+            } else {
+                None
             }
-            let (width, height) = candidate.dimensions;
-            let image = raster::limit_size(&self.0, width.max(height));
-            let output = encode_output(&image, candidate.quality, candidate.setting, &runner)?;
-            return Ok((output.bytes.len() <= max_bytes).then_some(output));
-        }
-        if baseline.is_some() {
-            return Ok(baseline);
-        }
-
-        let mut best: Option<Output> = None;
-        self.visit_candidates(
-            options,
-            f64::from(DEFAULT_QUALITY),
-            max_bytes,
-            false,
-            &runner,
-            |candidate| {
+        } else {
+            if fits {
+                return Ok(Some(baseline));
+            }
+            let mut best: Option<Output> = None;
+            self.visit_candidates(options, search, &runner, |candidate| {
                 if best.as_ref().is_none_or(|current| {
                     candidate
                         .quality
@@ -320,9 +358,26 @@ impl Source {
                 }) {
                     best = Some(candidate);
                 }
-            },
-        )?;
-        Ok(best)
+            })?;
+            best
+        };
+        if smaller.is_some() || !jpeg_xl_fallback {
+            return Ok(smaller);
+        }
+
+        let mut smallest = baseline;
+        search.max_bytes = smallest.bytes.len();
+        search.detailed = true;
+        search.exhaustive = true;
+        self.visit_candidates(options, search, &runner, |candidate| {
+            if candidate.bytes.len() < smallest.bytes.len()
+                || candidate.bytes.len() == smallest.bytes.len()
+                    && candidate.quality > smallest.quality
+            {
+                smallest = candidate;
+            }
+        })?;
+        Ok(Some(smallest))
     }
 
     /// Optimize for a minimum similarity score from 1 to 100.
@@ -340,9 +395,13 @@ impl Source {
 
         self.visit_candidates(
             options,
-            f64::from(min_quality),
-            usize::MAX,
-            false,
+            Search {
+                min_quality: f64::from(min_quality),
+                max_bytes: usize::MAX,
+                detailed: false,
+                exhaustive: false,
+                cancelled: None,
+            },
             &runner,
             |candidate| {
                 if candidate.bytes.len() < best.bytes.len() {
@@ -356,54 +415,39 @@ impl Source {
     fn visit_candidates(
         &self,
         options: Options,
-        min_quality: f64,
-        max_bytes: usize,
-        detailed: bool,
+        search: Search<'_>,
         runner: &Option<ThreadsRunner<'_>>,
         mut visit: impl FnMut(Output),
     ) -> Result<()> {
+        search.check_cancelled()?;
         let lossless = options.format.lossless_setting();
-        let lossy = options.format.compression_settings(detailed);
+        let lossy = options.format.compression_settings(search.detailed);
         let reference = raster::QualityReference::new(&self.0);
-        probe_compression(
-            &self.0,
-            &reference,
-            min_quality,
-            max_bytes,
-            &lossy,
-            runner,
-            &mut visit,
-        )?;
+        probe_compression(&self.0, &reference, search, &lossy, runner, &mut visit)?;
 
         if options.auto_resize {
             let source_side = self.0.width().max(self.0.height());
             let mut previous_dimensions = self.0.dimensions();
             for scale in RESIZE_SCALES {
+                search.check_cancelled()?;
                 let image = raster::limit_size(&self.0, (source_side * scale / 100).max(1));
                 if image.dimensions() == previous_dimensions {
                     continue;
                 }
-                let Some(quality) = accepted_quality(reference.compare(&image)?, min_quality)
+                let Some(quality) =
+                    accepted_quality(reference.compare(&image)?, search.min_quality)
                 else {
                     break;
                 };
                 previous_dimensions = image.dimensions();
                 let candidate = encode_output(&image, quality, lossless, runner)?;
-                if candidate.bytes.len() <= max_bytes {
+                if candidate.bytes.len() <= search.max_bytes {
                     visit(candidate);
                 }
-                probe_compression(
-                    &image,
-                    &reference,
-                    min_quality,
-                    max_bytes,
-                    &lossy,
-                    runner,
-                    &mut visit,
-                )?;
+                probe_compression(&image, &reference, search, &lossy, runner, &mut visit)?;
             }
         }
-        Ok(())
+        search.check_cancelled()
     }
 
     pub fn measure(&self, setting: Setting) -> Result<Measurement> {
@@ -512,11 +556,31 @@ fn output_budget(source_bytes: usize, lossless_bytes: usize) -> usize {
     source_bytes.saturating_sub(1).min(lossless_bytes)
 }
 
+#[derive(Clone, Copy)]
+struct Search<'a> {
+    min_quality: f64,
+    max_bytes: usize,
+    detailed: bool,
+    exhaustive: bool,
+    cancelled: Option<&'a AtomicBool>,
+}
+
+impl Search<'_> {
+    fn check_cancelled(self) -> Result<()> {
+        if self
+            .cancelled
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(Error::Cancelled);
+        }
+        Ok(())
+    }
+}
+
 fn probe_compression(
     image: &RgbaImage,
     reference: &raster::QualityReference<'_>,
-    min_quality: f64,
-    max_bytes: usize,
+    search: Search<'_>,
     lossy: &[Setting],
     runner: &Option<ThreadsRunner<'_>>,
     visit: &mut impl FnMut(Output),
@@ -527,23 +591,29 @@ fn probe_compression(
     }
 
     for &setting in lossy {
+        search.check_cancelled()?;
         let bytes = setting.encode(image, runner)?;
-        if bytes.len() > max_bytes {
+        search.check_cancelled()?;
+        if bytes.len() > search.max_bytes {
             continue;
         }
         let decoded = decode_candidate(&bytes, dimensions, setting, runner)?;
-        if !raster::alpha_equal(image, &decoded) {
+        search.check_cancelled()?;
+        let quality = if raster::alpha_equal(image, &decoded) {
+            accepted_quality(reference.compare(&decoded)?, search.min_quality)
+        } else {
+            None
+        };
+        if let Some(quality) = quality {
+            visit(Output {
+                bytes,
+                dimensions,
+                quality,
+                setting,
+            });
+        } else if !search.exhaustive {
             break;
         }
-        let Some(quality) = accepted_quality(reference.compare(&decoded)?, min_quality) else {
-            break;
-        };
-        visit(Output {
-            bytes,
-            dimensions,
-            quality,
-            setting,
-        });
     }
     Ok(())
 }
@@ -668,6 +738,63 @@ mod tests {
             assert_eq!(optimized.bytes.len(), baseline.bytes.len());
             assert!(source.optimize(options, 1).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn jpeg_xl_conversion_falls_back_to_the_smallest_acceptable_result() {
+        let source = sample();
+        let options = Options::default();
+        let cancelled = AtomicBool::new(false);
+        let fallback = source
+            .optimize_for_conversion(options, 1, OptimizationMode::Best, &cancelled)
+            .unwrap()
+            .unwrap();
+        let reference = raster::QualityReference::new(&source.0);
+        let runner = parallel_runner();
+        let lossless = Setting::JxlLossless.encode(&source.0, &runner).unwrap();
+        let mut smallest = lossless.len();
+        for setting in options.format.compression_settings(true) {
+            let bytes = setting.encode(&source.0, &runner).unwrap();
+            let decoded = setting.decode(&bytes, &runner).unwrap();
+            if raster::alpha_equal(&source.0, &decoded)
+                && accepted_quality(
+                    reference.compare(&decoded).unwrap(),
+                    f64::from(DEFAULT_QUALITY),
+                )
+                .is_some()
+            {
+                smallest = smallest.min(bytes.len());
+            }
+        }
+        assert_eq!(fallback.bytes.len(), smallest);
+        assert_eq!(fallback.setting.format(), OutputFormat::JpegXl);
+        assert_eq!(fallback.dimensions, source.dimensions());
+        assert!(fallback.quality >= f64::from(DEFAULT_QUALITY));
+        assert!(
+            source
+                .optimize_for_conversion(
+                    Options {
+                        format: OutputFormat::Webp,
+                        ..options
+                    },
+                    1,
+                    OptimizationMode::Best,
+                    &cancelled,
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cancelled_conversion_reports_interruption() {
+        let result = sample().optimize_for_conversion(
+            Options::default(),
+            1,
+            OptimizationMode::Best,
+            &AtomicBool::new(true),
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
     }
 
     #[test]

@@ -10,7 +10,11 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, TryRecvError},
+    },
     time::Duration,
 };
 
@@ -76,6 +80,7 @@ struct QueueEntry {
 
 struct Batch {
     events: Receiver<Event>,
+    cancelled: Arc<AtomicBool>,
     remaining: usize,
     recent: VecDeque<Duration>,
 }
@@ -90,7 +95,7 @@ impl Batch {
     }
 
     fn estimate_seconds(&self) -> Option<u64> {
-        if self.remaining == 0 || self.recent.is_empty() {
+        if self.remaining == 0 || self.recent.is_empty() || self.cancelled.load(Ordering::Relaxed) {
             return None;
         }
         let seconds: f64 = self.recent.iter().map(Duration::as_secs_f64).sum();
@@ -424,33 +429,23 @@ impl Tenka {
         }
         if ui
             .put(center, |ui: &mut Ui| {
-                ui.add_enabled(!busy && pending > 0, Button::new(self.label(22)))
+                if let Some(worker) = &self.worker {
+                    ui.add_enabled(
+                        !worker.cancelled.load(Ordering::Relaxed),
+                        Button::new(RichText::new(self.label(130)).color(egui::Color32::WHITE))
+                            .fill(egui::Color32::from_rgb(175, 40, 50)),
+                    )
+                } else {
+                    ui.add_enabled(pending > 0, Button::new(self.label(22)))
+                }
             })
             .clicked()
         {
-            self.folder_failure = None;
-            let entries = self
-                .queue
-                .iter()
-                .enumerate()
-                .filter_map(|(index, entry)| {
-                    matches!(entry.status, Status::Pending).then_some((index, entry.path.clone()))
-                })
-                .collect::<Vec<_>>();
-            self.worker = Some(Batch {
-                remaining: entries.len(),
-                recent: VecDeque::new(),
-                events: jobs::convert(
-                    ui.ctx(),
-                    entries,
-                    self.folder.clone(),
-                    Options {
-                        format: self.format,
-                        auto_resize: false,
-                    },
-                    self.mode,
-                ),
-            });
+            if let Some(worker) = &self.worker {
+                worker.cancelled.store(true, Ordering::Relaxed);
+            } else {
+                self.start_conversion(ui.ctx());
+            }
         }
         let busy = self.worker.is_some();
         if ui
@@ -483,6 +478,34 @@ impl Tenka {
         } else {
             self.show_queue(ui, busy);
         }
+    }
+
+    fn start_conversion(&mut self, context: &Context) {
+        self.folder_failure = None;
+        let entries: Vec<_> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry.status, Status::Pending))
+            .map(|(index, entry)| (index, entry.path.clone()))
+            .collect();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.worker = Some(Batch {
+            remaining: entries.len(),
+            recent: VecDeque::new(),
+            events: jobs::convert(
+                context,
+                entries,
+                self.folder.clone(),
+                Options {
+                    format: self.format,
+                    auto_resize: false,
+                },
+                self.mode,
+                Arc::clone(&cancelled),
+            ),
+            cancelled,
+        });
     }
 
     fn show_queue(&mut self, ui: &mut Ui, busy: bool) {
@@ -653,29 +676,40 @@ impl Tenka {
     fn show_output(&self, ui: &mut Ui, status: &Status, folder_failure: &mut Option<Failure>) {
         match status {
             Status::Done(Ok(Some(result))) => {
-                ui.add(
-                    egui::Label::new(format!(
-                        "{} -> {}",
-                        self.catalog.file_size(result.source_bytes),
-                        self.catalog.file_size(result.bytes),
-                    ))
-                    .truncate()
-                    .sense(egui::Sense::click()),
-                )
-                .on_hover_text(path_label(&result.path))
-                .context_menu(|ui| {
-                    if ui.button(self.label(70)).clicked() {
-                        if let Some(parent) = result.path.parent()
-                            && let Err(error) = Command::new("xdg-open").arg(parent).spawn()
-                        {
-                            *folder_failure = Some(Failure {
-                                label: 71,
-                                detail: error.to_string(),
-                            });
+                let grew = result.bytes > result.source_bytes;
+                let mut text_area = ui.available_rect_before_wrap();
+                if grew {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    text_area.max.x -= icons::INFO_SIZE.x + ui.spacing().item_spacing.x;
+                }
+                ui.scope_builder(egui::UiBuilder::new().max_rect(text_area), |ui| {
+                    ui.add(
+                        egui::Label::new(format!(
+                            "{} -> {}",
+                            self.catalog.file_size(result.source_bytes),
+                            self.catalog.file_size(result.bytes),
+                        ))
+                        .truncate()
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text(path_label(&result.path))
+                    .context_menu(|ui| {
+                        if ui.button(self.label(70)).clicked() {
+                            if let Some(parent) = result.path.parent()
+                                && let Err(error) = Command::new("xdg-open").arg(parent).spawn()
+                            {
+                                *folder_failure = Some(Failure {
+                                    label: 71,
+                                    detail: error.to_string(),
+                                });
+                            }
+                            ui.close();
                         }
-                        ui.close();
-                    }
+                    });
                 });
+                if grew {
+                    icons::info(ui, self.label(129));
+                }
             }
             Status::Done(Ok(None)) => {
                 ui.weak("—").on_hover_text(self.label(107));
@@ -709,6 +743,7 @@ impl Tenka {
                     self.queue[index].status = Status::Done(result);
                     worker.record(elapsed);
                 }
+                Ok(Event::Interrupted(index)) => self.queue[index].status = Status::Pending,
                 Ok(Event::Finished) => self.worker = None,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -941,6 +976,7 @@ mod tests {
         let (_, events) = std::sync::mpsc::channel();
         let mut batch = Batch {
             events,
+            cancelled: Arc::new(AtomicBool::new(false)),
             remaining: 12,
             recent: VecDeque::new(),
         };
