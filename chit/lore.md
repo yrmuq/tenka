@@ -15,4 +15,4 @@
 
 ## Compatibility Workarounds
 
-- Both windows accept file drops through native Wayland. Keep the Winit 0.30 file-drop backport until eframe supports native Wayland drops upstream.
+- Handle native Wayland file drops through the existing clipboard data device while eframe uses Winit 0.30, since compositors can route drops to only one device per seat.

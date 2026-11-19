@@ -1,4 +1,5 @@
 mod comparison;
+mod file_drop;
 mod icons;
 mod jobs;
 mod language;
@@ -14,6 +15,7 @@ use std::{
 use eframe::egui::{
     self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui,
 };
+use file_drop::FileDrops;
 use jobs::{Conversion, Event, Failure};
 use language::Catalog;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
@@ -59,6 +61,7 @@ struct Tenka {
     language: String,
     theme: ThemePreference,
     system_theme: theme::SystemTheme,
+    file_drops: FileDrops,
     catalog: Catalog,
     queue: Vec<QueueEntry>,
     folder: Option<PathBuf>,
@@ -105,6 +108,7 @@ impl Tenka {
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
+            file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
             folder: None,
             conversion: Options::default(),
@@ -413,8 +417,7 @@ impl eframe::App for Tenka {
     fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
         self.system_theme.apply(context, self.theme);
         self.poll_worker();
-        let drops = context.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
-        self.add_files(drops.into_iter().filter_map(|file| file.path));
+        self.add_files(self.file_drops.take(context));
         self.header(context);
         egui::CentralPanel::default()
             .frame(

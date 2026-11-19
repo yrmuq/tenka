@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 
 use crate::{
+    file_drop::FileDrops,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
     language::Catalog,
@@ -38,6 +39,7 @@ pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Re
                 catalog,
                 theme,
                 system_theme: SystemTheme::new(&creation.egui_ctx),
+                file_drops: FileDrops::new(&creation.egui_ctx),
                 images: Vec::new(),
                 next: 0,
                 loading: None,
@@ -52,6 +54,7 @@ struct Comparison {
     catalog: Catalog,
     theme: ThemePreference,
     system_theme: SystemTheme,
+    file_drops: FileDrops,
     images: Vec<Entry>,
     next: usize,
     loading: Option<Receiver<Result<ComparisonPixels, Failure>>>,
@@ -267,8 +270,7 @@ impl Comparison {
 impl eframe::App for Comparison {
     fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
         self.system_theme.apply(context, self.theme);
-        let drops = context.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
-        self.add(drops.into_iter().filter_map(|file| file.path));
+        self.add(self.file_drops.take(context));
         egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
             ui.horizontal(|ui| {
                 if ui.button(self.catalog.text(8)).clicked()

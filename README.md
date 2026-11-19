@@ -73,7 +73,7 @@ Tenka is distributed under the [GNU General Public License, version 3](LICENSE).
 | Component | Upstream | License | Integration Details |
 | --- | --- | --- | --- |
 | egui / eframe | [emilk/egui](https://github.com/emilk/egui) | `MIT OR Apache-2.0` | Desktop interface. |
-| Winit | [rust-windowing/winit](https://github.com/rust-windowing/winit) | `Apache-2.0` | Desktop windows with a [native Wayland file-drop backport](https://github.com/MixaDoDs/photocraft/commit/3f766332a7212f2a5fe5f6b3da7ee12e4ab2f05d). |
+| Smithay Clipboard | [Smithay/smithay-clipboard](https://github.com/Smithay/smithay-clipboard) | `MIT` | Wayland clipboard and incoming file drops. |
 | jpegxl-rs | [inflation/jpegxl-rs](https://github.com/inflation/jpegxl-rs) | `GPL-3.0-or-later` | Rust bindings for JPEG XL. |
 | libjxl | [libjxl/libjxl](https://github.com/libjxl/libjxl) | `BSD-3-Clause` | JPEG XL codec. |
 | libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP encoder for conversion and comparison. |
