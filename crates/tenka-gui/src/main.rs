@@ -338,6 +338,7 @@ impl Tenka {
             )
             .inner;
         egui::Popup::from_toggle_button_response(&button)
+            .id(ui.make_persistent_id("conversion_errors_popup"))
             .align(egui::RectAlign::TOP_END)
             .gap(6.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)

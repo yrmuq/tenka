@@ -96,7 +96,7 @@ pub(crate) fn errors(ui: &mut Ui, label: &str) -> Response {
     let mark = ui.visuals().panel_fill;
     painter.line_segment(
         [center + vec2(0.0, -4.0), center + vec2(0.0, 1.0)],
-        Stroke::new(1.7, mark),
+        Stroke::new(1.7_f32, mark),
     );
     painter.circle_filled(center + vec2(0.0, 4.0), 1.0, mark);
     response
@@ -110,7 +110,7 @@ pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {
     let bottom = center + vec2(6.0, 6.0);
     let painter = ui.painter();
     let color = ui.visuals().text_color();
-    let stroke = Stroke::new(1.3, color);
+    let stroke = Stroke::new(1.3_f32, color);
     painter.line_segment([left, top], stroke);
     painter.line_segment([left, bottom], stroke);
     for node in [left, top, bottom] {
