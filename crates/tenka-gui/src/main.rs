@@ -1,4 +1,5 @@
 mod comparison;
+mod icons;
 mod jobs;
 mod language;
 mod theme;
@@ -14,7 +15,7 @@ use eframe::egui::{
     self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui,
 };
 use jobs::{Conversion, Event, Failure};
-use language::{Catalog, LANGUAGES};
+use language::Catalog;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
 
 fn main() -> eframe::Result {
@@ -28,19 +29,36 @@ fn main() -> eframe::Result {
         let theme = parse_theme(args.next().as_deref());
         return comparison::run(icon, &language, theme);
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    let options = native_options(
+        egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka")
             .with_icon(icon)
             .with_inner_size([960.0, 650.0])
             .with_min_inner_size([700.0, 490.0]),
-        ..Default::default()
-    };
+        true,
+    );
     eframe::run_native(
         "Tenka",
         options,
         Box::new(|context| Ok(Box::new(Tenka::new(context)))),
     )
+}
+
+fn native_options(viewport: egui::ViewportBuilder, persist_window: bool) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport,
+        persist_window,
+        #[cfg(target_os = "linux")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+
+            // Winit 0.30 delivers file drops through X11, including under XWayland.
+            if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
+                builder.with_x11();
+            }
+        })),
+        ..Default::default()
+    }
 }
 
 enum Status {
@@ -73,7 +91,7 @@ impl Tenka {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
         let read = |key| context.storage.and_then(|storage| storage.get_string(key));
         let language = read("language")
-            .filter(|value| LANGUAGES.contains(&value.as_str()))
+            .filter(|value| value == "en")
             .unwrap_or_else(|| "system".into());
         let theme = parse_theme(read("theme").as_deref());
         context.egui_ctx.set_theme(theme);
@@ -129,60 +147,30 @@ impl Tenka {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
-                    ui.label(RichText::new(self.label(1)).strong());
                     if ui.button(self.label(109)).clicked() {
                         self.open_comparison();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let theme_label =
                             format!("{} · {}", self.label(4), self.label(theme_id(self.theme)));
-                        let options = [
-                            ThemePreference::System,
-                            ThemePreference::Light,
-                            ThemePreference::Dark,
-                        ]
-                        .map(|theme| (theme, self.label(theme_id(theme))));
-                        let previous_theme = self.theme;
-                        ComboBox::from_id_salt("theme")
-                            .selected_text(theme_label)
-                            .width(126.0)
-                            .show_ui(ui, |ui| {
-                                for (theme, label) in options {
-                                    ui.selectable_value(&mut self.theme, theme, label);
-                                }
-                            })
-                            .response
-                            .on_hover_text(self.label(4));
-                        if self.theme != previous_theme {
+                        if icons::theme(ui, self.theme, &theme_label).clicked() {
+                            self.theme = match self.theme {
+                                ThemePreference::System => ThemePreference::Light,
+                                ThemePreference::Light => ThemePreference::Dark,
+                                ThemePreference::Dark => ThemePreference::System,
+                            };
                             self.system_theme.apply(context, self.theme);
                         }
 
-                        let system = self.label(5);
-                        let language_label = |code: &str| match code {
-                            "en" => "English",
-                            "ru" => "Русский",
-                            _ => system,
+                        let language = if self.language == "en" {
+                            "English"
+                        } else {
+                            self.label(5)
                         };
-                        let previous_language = self.language.clone();
-                        ComboBox::from_id_salt("language")
-                            .selected_text(format!(
-                                "{} · {}",
-                                self.label(3),
-                                language_label(&self.language)
-                            ))
-                            .width(126.0)
-                            .show_ui(ui, |ui| {
-                                for code in LANGUAGES {
-                                    ui.selectable_value(
-                                        &mut self.language,
-                                        code.into(),
-                                        language_label(code),
-                                    );
-                                }
-                            })
-                            .response
-                            .on_hover_text(self.label(3));
-                        if self.language != previous_language {
+                        let language_label = format!("{} · {language}", self.label(3));
+                        if icons::globe(ui, &language_label).clicked() {
+                            self.language =
+                                if self.language == "en" { "system" } else { "en" }.into();
                             self.catalog = Catalog::new(&self.language);
                         }
                     });
@@ -236,7 +224,7 @@ impl Tenka {
             .iter()
             .filter(|entry| matches!(entry.status, Status::Pending))
             .count();
-        ui.horizontal(|ui| {
+        ui.vertical_centered(|ui| {
             if ui
                 .add_enabled(
                     !busy && pending > 0,
@@ -262,16 +250,10 @@ impl Tenka {
                     self.mode,
                 ));
             }
-            if pending > 0 {
-                ui.weak(format!("{}  {pending}", self.label(68)));
-            }
-            if busy
-                && self
-                    .queue
-                    .iter()
-                    .any(|e| matches!(e.status, Status::Running))
-            {
+            if busy {
                 ui.spinner();
+            } else if pending > 0 {
+                ui.weak(format!("{}  {pending}", self.label(68)));
             }
         });
         if let Some(error) = &self.folder_failure {
@@ -292,79 +274,53 @@ impl Tenka {
         let mut folder_failure = None;
         ScrollArea::vertical().show(ui, |ui| {
             Grid::new("files")
-                .num_columns(3)
+                .num_columns(2)
                 .striped(true)
                 .min_col_width(145.0)
                 .show(ui, |ui| {
-                    for id in [28, 76, 30] {
+                    for id in [28, 76] {
                         ui.strong(self.label(id));
                     }
                     ui.end_row();
                     for entry in &self.queue {
-                        ui.add(egui::Label::new(file_name(&entry.path)).truncate())
-                            .on_hover_text(path_label(&entry.path));
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(file_name(&entry.path)).truncate())
+                                .on_hover_text(path_label(&entry.path));
+                            if let Status::Done(Err(error)) = &entry.status {
+                                self.show_error(ui, error);
+                            }
+                        });
                         match &entry.status {
                             Status::Done(Ok(Some(result))) => {
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.weak(size(result.source_bytes));
-                                        let (arrow, _) = ui.allocate_exact_size(
-                                            egui::vec2(12.0, 10.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().arrow(
-                                            arrow.left_center(),
-                                            egui::vec2(arrow.width(), 0.0),
-                                            egui::Stroke::new(
-                                                1.0_f32,
-                                                ui.visuals().weak_text_color(),
-                                            ),
-                                        );
-                                        ui.strong(format!(
-                                            "{} · {} × {}",
-                                            size(result.bytes),
-                                            result.dimensions.0,
-                                            result.dimensions.1
-                                        ));
-                                        ui.weak(if result.lossless {
-                                            self.label(17).into()
-                                        } else {
-                                            format!("{:.1}", result.quality)
-                                        });
-                                    });
-                                    ui.add(egui::Label::new(file_name(&result.path)).truncate())
-                                        .on_hover_text(path_label(&result.path));
-                                });
-                                ui.vertical(|ui| {
-                                    ui.label(self.label(26));
-                                    if ui.small_button(self.label(70)).clicked()
-                                        && let Some(parent) = result.path.parent()
-                                        && let Err(error) = std::process::Command::new("xdg-open")
-                                            .arg(parent)
-                                            .spawn()
-                                    {
-                                        folder_failure = Some(Failure {
-                                            label: 71,
-                                            detail: error.to_string(),
-                                        });
+                                ui.add(
+                                    egui::Label::new(format!(
+                                        "{} → {}",
+                                        self.catalog.file_size(result.source_bytes),
+                                        self.catalog.file_size(result.bytes),
+                                    ))
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(path_label(&result.path))
+                                .context_menu(|ui| {
+                                    if ui.button(self.label(70)).clicked() {
+                                        if let Some(parent) = result.path.parent()
+                                            && let Err(error) =
+                                                Command::new("xdg-open").arg(parent).spawn()
+                                        {
+                                            folder_failure = Some(Failure {
+                                                label: 71,
+                                                detail: error.to_string(),
+                                            });
+                                        }
+                                        ui.close();
                                     }
                                 });
                             }
-                            other => {
+                            Status::Done(Ok(None)) => {
+                                ui.weak("—").on_hover_text(self.label(107));
+                            }
+                            _ => {
                                 ui.weak("—");
-                                match other {
-                                    Status::Pending => {
-                                        ui.weak(self.label(24));
-                                    }
-                                    Status::Running => {
-                                        ui.label(self.label(25));
-                                    }
-                                    Status::Done(Err(error)) => self.show_error(ui, error),
-                                    Status::Done(Ok(None)) => {
-                                        ui.weak(self.label(107));
-                                    }
-                                    Status::Done(Ok(Some(_))) => unreachable!(),
-                                }
                             }
                         }
                         ui.end_row();
@@ -380,7 +336,7 @@ impl Tenka {
         rfd::FileDialog::new().add_filter(self.label(65), &["jpg", "jpeg", "png", "webp"])
     }
 
-    fn add_files(&mut self, paths: Vec<PathBuf>) {
+    fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         for path in paths {
             if !self.queue.iter().any(|existing| existing.path == path) {
                 self.queue.push(QueueEntry {
@@ -426,15 +382,9 @@ impl Tenka {
     fn open_comparison(&mut self) {
         self.comparison_failure = None;
         let child = std::env::current_exe().and_then(|executable| {
-            let mut command = Command::new(executable);
-            command.args(["--compare", &self.language, theme_name(self.theme)]);
-            // Winit only delivers file drops on X11. Use XWayland for this window when available.
-            if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
-                command
-                    .env_remove("WAYLAND_DISPLAY")
-                    .env_remove("WAYLAND_SOCKET");
-            }
-            command.spawn()
+            Command::new(executable)
+                .args(["--compare", &self.language, theme_name(self.theme)])
+                .spawn()
         });
         match child {
             Ok(child) => self.comparison_windows.push(child),
@@ -476,17 +426,8 @@ impl eframe::App for Tenka {
     fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
         self.system_theme.apply(context, self.theme);
         self.poll_worker();
-        if self.worker.is_none() {
-            let files = context.input(|input| {
-                input
-                    .raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|file| file.path.clone())
-                    .collect::<Vec<_>>()
-            });
-            self.add_files(files);
-        }
+        let drops = context.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        self.add_files(drops.into_iter().filter_map(|file| file.path));
         self.header(context);
         egui::CentralPanel::default()
             .frame(
@@ -586,12 +527,4 @@ fn file_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
-}
-
-fn size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    }
 }

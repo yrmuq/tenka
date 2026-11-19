@@ -19,9 +19,6 @@ pub struct Conversion {
     pub path: PathBuf,
     pub source_bytes: usize,
     pub bytes: usize,
-    pub dimensions: (u32, u32),
-    pub quality: f64,
-    pub lossless: bool,
 }
 
 pub struct ComparisonPixels {
@@ -167,9 +164,6 @@ fn convert_one(
         path,
         source_bytes: bytes.len(),
         bytes: output.bytes.len(),
-        dimensions: output.dimensions,
-        quality: output.quality,
-        lossless: output.setting.is_lossless() && output.dimensions == source.dimensions(),
     }))
 }
 

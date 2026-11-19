@@ -2910,6 +2910,7 @@ dependencies = [
  "rfd",
  "tempfile",
  "tenka-core",
+ "winit",
  "zbus",
 ]
 

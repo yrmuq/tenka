@@ -15,4 +15,4 @@
 
 ## Compatibility Workarounds
 
-- Use XWayland for the independent comparison window when X11 is available because Winit 0.30 does not deliver Wayland file drops. Remove the fallback when Winit supports native Wayland file drops.
+- Use XWayland for both windows when X11 is available because Winit 0.30 does not deliver native Wayland file drops. Remove the fallback when Winit supports native Wayland file drops.

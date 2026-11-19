@@ -35,8 +35,11 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | **Output format** | Choose JPEG XL or WebP. |
 | **Mode** | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
 | Enable **Automatically reduce resolution** | Consider smaller dimensions while comparing visual similarity to the original. |
-| Select **Convert pending** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
+| Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
+| Right-click a size in **Output** | Open the folder containing the converted image. |
 | Select **Compare** | Drop files into the comparison window or select **Add images**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
+| Select the globe | Toggle between the system language and English. |
+| Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
 
 Tenka saves only results that are smaller than the source and no larger than a full-resolution lossless encode in the selected format. It compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 

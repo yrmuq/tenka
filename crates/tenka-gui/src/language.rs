@@ -3,8 +3,6 @@ use std::{collections::HashMap, env};
 const ENGLISH: &str = include_str!("../../../languages/English.ini");
 const RUSSIAN: &str = include_str!("../../../languages/Russian.ini");
 
-pub const LANGUAGES: [&str; 3] = ["system", "en", "ru"];
-
 pub struct Catalog(HashMap<u16, &'static str>);
 
 impl Catalog {
@@ -28,6 +26,21 @@ impl Catalog {
 
     pub fn text(&self, id: u16) -> &'static str {
         self.0.get(&id).copied().unwrap_or("")
+    }
+
+    pub(crate) fn file_size(&self, bytes: usize) -> String {
+        if bytes < 1024 {
+            return format!("{bytes} {}", self.text(117));
+        }
+        let kib = bytes as f64 / 1024.0;
+        // Display thousands of the previous KiB counter in the compact table.
+        let (value, unit) = if kib >= 1000.0 {
+            (kib / 1000.0, 119)
+        } else {
+            (kib, 118)
+        };
+        let value = format!("{value:.1}").replace('.', self.text(120));
+        format!("{value} {}", self.text(unit))
     }
 }
 
@@ -71,5 +84,16 @@ mod tests {
             .collect();
         assert_eq!(english, russian);
         assert_eq!(Catalog::new("ru").text(22), "Конвертировать");
+    }
+
+    #[test]
+    fn file_sizes_use_the_catalog_units_and_decimal_separator() {
+        let ru = Catalog::new("ru");
+        let en = Catalog::new("en");
+        assert_eq!(ru.file_size(18_907_265), "18,5 МБ");
+        assert_eq!(ru.file_size(1_462_628), "1,4 МБ");
+        assert_eq!(en.file_size(1_462_628), "1.4 MB");
+        assert_eq!(en.file_size(1_536), "1.5 KB");
+        assert_eq!(en.file_size(512), "512 B");
     }
 }
