@@ -344,6 +344,7 @@ impl Tenka {
             .id(ui.make_persistent_id("conversion_errors_popup"))
             .align(egui::RectAlign::TOP_END)
             .gap(6.0)
+            .frame(egui::Frame::popup(ui.style()).fill(ui.visuals().panel_fill))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| self.error_panel(ui, &errors.collect::<Vec<_>>()));
     }
@@ -406,13 +407,12 @@ impl Tenka {
             .as_deref()
             .map(path_label)
             .unwrap_or_else(|| self.label(10).into());
-        let output_label = self.folder.as_deref().map_or_else(
-            || self.label(9).into(),
-            |path| format!("↓ {}", file_name(path)),
-        );
         if ui
             .put(center.translate(-offset), |ui: &mut Ui| {
-                ui.add_enabled(!busy, Button::new(output_label).truncate())
+                match &self.folder {
+                    Some(path) => icons::output_folder(ui, file_name(path), !busy),
+                    None => ui.add_enabled(!busy, Button::new(self.label(9))),
+                }
             })
             .on_hover_text(destination)
             .clicked()

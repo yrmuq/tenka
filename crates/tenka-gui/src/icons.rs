@@ -1,5 +1,5 @@
 use eframe::egui::{
-    Align2, Button, Color32, FontId, Rect, Response, Shape, Stroke, ThemePreference, Ui,
+    Align2, Atom, Button, Color32, FontId, Rect, Response, Shape, Stroke, ThemePreference, Ui,
     WidgetInfo, WidgetType, vec2,
 };
 
@@ -117,6 +117,26 @@ pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {
         painter.circle_filled(node, 2.5, color);
     }
     response
+}
+
+pub(crate) fn output_folder(ui: &mut Ui, name: String, enabled: bool) -> Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let arrow = ui.id().with("folder_arrow");
+        let button = Button::new((Atom::custom(arrow, vec2(10.0, 12.0)), name))
+            .truncate()
+            .atom_ui(ui);
+        if let Some(rect) = button.rect(arrow) {
+            let center = rect.center();
+            let tip = center + vec2(0.0, 4.0);
+            let stroke = Stroke::new(1.3_f32, ui.style().interact(&button.response).text_color());
+            let painter = ui.painter();
+            painter.line_segment([center - vec2(0.0, 4.0), tip], stroke);
+            painter.line_segment([center + vec2(-3.5, 0.5), tip], stroke);
+            painter.line_segment([center + vec2(3.5, 0.5), tip], stroke);
+        }
+        button.response
+    })
+    .inner
 }
 
 fn icon_button(ui: &mut Ui, label: &str) -> Response {
