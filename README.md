@@ -14,16 +14,16 @@
 
 Tenka is a Linux image optimizer. Its Rust engine automatically selects compression and optionally reduces resolution while keeping the saved image visually close to the original. The engine is a separate Rust library for reuse in desktop apps and container workloads.
 
-![Tenka's automatic conversion tab](docs/tenka.jpg)
+![Tenka's conversion window](docs/tenka.jpg)
 
 ---
 
 ## Features
 
 - Batch conversion of still, 8-bit JPEG, PNG, and WebP images up to 36 megapixels to JPEG XL or WebP.
-- Automatic compression selection and optional resolution reduction based on similarity to the original.
+- Best, Balance, and Cheap conversion modes with optional resolution reduction.
 - Lossless encoding of prepared pixels, with source orientation applied and supported ICC profiles converted to sRGB.
-- Batch tests at up to eleven quality thresholds in the selected codec, with saved results and previews.
+- Full-resolution image comparison with shared zoom and pan.
 - English and Russian interface with system, light, and dark themes.
 
 ---
@@ -35,12 +35,10 @@ Tenka is a Linux image optimizer. Its Rust engine automatically selects compress
 | --- | --- |
 | Drop files or select **Add images** | Add source images to the conversion queue. |
 | **Output format** | Choose JPEG XL or WebP. |
-| Enable **Automatically reduce resolution** | Also test smaller dimensions for visual similarity to the original. Enabled by default in **Tests**. |
-| Select **Convert pending** | Save the most similar result that saves space in the selected format. Results go beside their originals or into the chosen folder. Existing files are kept. |
-| Set **Quality, %** in **Tests** and select **+** | Start at 100% and add up to ten extra values, each two points below the previous one, with a minimum of 1%. At 100%, Tenka encodes losslessly at the original resolution. Below 100%, it looks for the closest result at or below the requested score, testing resizing alone and with compression when resizing is enabled. At equal displayed scores, the smaller file wins. |
-| Select **Run tests and save** in **Tests** | Save each matching result in the selected format, next to the source or in the chosen folder. The file name includes the requested score, such as `photo-90.webp`. |
-| Select a test result | Display it beside the source preview. |
-| Select **Compare images** in **Tests** | Drop files into the comparison window or select **Add images**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
+| **Mode** | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
+| Enable **Automatically reduce resolution** | Consider smaller dimensions while comparing visual similarity to the original. |
+| Select **Convert pending** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
+| Select **Compare** | Drop files into the comparison window or select **Add images**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 
 Tenka saves only results that are smaller than the source and no larger than a full-resolution lossless encode in the selected format. It compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 

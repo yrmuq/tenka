@@ -1,7 +1,6 @@
 //! Still-image conversion and codec measurements without filesystem or GUI dependencies.
 
 mod jxl_header;
-mod quality_test;
 mod raster;
 
 use std::time::{Duration, Instant};
@@ -17,12 +16,11 @@ use jpegxl_rs::{
 };
 use thiserror::Error;
 
-pub use quality_test::QualityTest;
-
 pub const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PIXELS: u64 = 36_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
+const PERCEPTUAL_QUALITY: f64 = 80.0;
 const BLOCK_ERROR_PER_POINT: f64 = 0.4;
 const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
@@ -42,10 +40,6 @@ pub enum Error {
     Options,
     #[error("Quality {0} is outside the allowed range of 1 to 100")]
     QualityRange(u8),
-    #[error("No tested encoding reached a similarity of {0}% or lower")]
-    QualityCeiling(u8),
-    #[error("No tested encoding fit both the quality ceiling and the output size limit")]
-    TestSizeLimit,
     #[error("Image decoding failed")]
     Decode(#[source] image::ImageError),
     #[error("JPEG XL encoding failed")]
@@ -103,18 +97,38 @@ impl OutputFormat {
         }
     }
 
-    fn settings(self) -> (Setting, [Setting; 5]) {
+    fn lossless_setting(self) -> Setting {
         match self {
-            Self::JpegXl => (
-                Setting::JxlLossless,
-                [0.4, 0.75, 1.25, 2.0, 3.0].map(Setting::Jxl),
-            ),
-            Self::Webp => (
-                Setting::WebpLossless,
-                [98.0, 94.0, 82.0, 70.0, 55.0].map(Setting::Webp),
-            ),
+            Self::JpegXl => Setting::JxlLossless,
+            Self::Webp => Setting::WebpLossless,
         }
     }
+
+    fn compression_settings(self, detailed: bool) -> Vec<Setting> {
+        let (values, more, setting): (_, _, fn(f32) -> Setting) = match self {
+            Self::JpegXl => ([0.4, 0.75, 1.25, 2.0, 3.0], [4.0, 5.0], Setting::Jxl),
+            Self::Webp => ([98.0, 94.0, 82.0, 70.0, 55.0], [45.0, 35.0], Setting::Webp),
+        };
+        let mut settings = Vec::with_capacity(if detailed { 11 } else { 5 });
+        for (index, value) in values.into_iter().enumerate() {
+            if detailed && index > 0 {
+                settings.push(setting(f32::midpoint(values[index - 1], value)));
+            }
+            settings.push(setting(value));
+        }
+        if detailed {
+            settings.extend(more.map(setting));
+        }
+        settings
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptimizationMode {
+    #[default]
+    Best,
+    Balance,
+    Cheap,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -244,24 +258,49 @@ impl Source {
         self.convert_with_quality(options, DEFAULT_QUALITY)
     }
 
-    /// Start a comparison series that reuses measurements for this source and format.
-    pub fn quality_test(&self, options: Options) -> QualityTest<'_> {
-        QualityTest::new(&self.0, options, None)
-    }
-
-    /// Start a comparison series limited by the source and full-resolution lossless sizes.
-    pub fn quality_test_with_source_size(&self, options: Options, bytes: usize) -> QualityTest<'_> {
-        QualityTest::new(&self.0, options, Some(bytes))
-    }
-
     /// Find the most similar tested output that reduces the original file size.
     pub fn optimize(&self, options: Options, source_bytes: usize) -> Result<Option<Output>> {
+        self.optimize_with_mode(options, source_bytes, OptimizationMode::Best)
+    }
+
+    /// Choose a smaller output using the requested quality and size trade-off.
+    pub fn optimize_with_mode(
+        &self,
+        options: Options,
+        source_bytes: usize,
+        mode: OptimizationMode,
+    ) -> Result<Option<Output>> {
         let runner = parallel_runner();
-        let (lossless, _) = options.format.settings();
-        let baseline = lossless_output(&self.0, 100.0, lossless, &runner)?;
+        let lossless = options.format.lossless_setting();
+        let baseline = encode_output(&self.0, 100.0, lossless, &runner)?;
         let max_bytes = output_budget(source_bytes, baseline.bytes.len());
-        if baseline.bytes.len() <= max_bytes {
-            return Ok(Some(baseline));
+        let baseline = (baseline.bytes.len() <= max_bytes).then_some(baseline);
+        if mode != OptimizationMode::Best {
+            let mut candidates = Vec::new();
+            if let Some(output) = &baseline {
+                candidates.push(Candidate::from(output));
+            }
+            self.visit_candidates(
+                options,
+                PERCEPTUAL_QUALITY,
+                max_bytes,
+                true,
+                &runner,
+                |output| candidates.push(Candidate::from(&output)),
+            )?;
+            let Some(candidate) = economical_candidate(&candidates, mode) else {
+                return Ok(None);
+            };
+            if candidate.setting == lossless && candidate.dimensions == self.dimensions() {
+                return Ok(baseline);
+            }
+            let (width, height) = candidate.dimensions;
+            let image = raster::limit_size(&self.0, width.max(height));
+            let output = encode_output(&image, candidate.quality, candidate.setting, &runner)?;
+            return Ok((output.bytes.len() <= max_bytes).then_some(output));
+        }
+        if baseline.is_some() {
+            return Ok(baseline);
         }
 
         let mut best: Option<Output> = None;
@@ -269,6 +308,7 @@ impl Source {
             options,
             f64::from(DEFAULT_QUALITY),
             max_bytes,
+            false,
             &runner,
             |candidate| {
                 if best.as_ref().is_none_or(|current| {
@@ -292,8 +332,8 @@ impl Source {
             return Err(Error::QualityRange(min_quality));
         }
         let runner = parallel_runner();
-        let (lossless, _) = options.format.settings();
-        let mut best = lossless_output(&self.0, 100.0, lossless, &runner)?;
+        let lossless = options.format.lossless_setting();
+        let mut best = encode_output(&self.0, 100.0, lossless, &runner)?;
         if min_quality == 100 {
             return Ok(best);
         }
@@ -302,6 +342,7 @@ impl Source {
             options,
             f64::from(min_quality),
             usize::MAX,
+            false,
             &runner,
             |candidate| {
                 if candidate.bytes.len() < best.bytes.len() {
@@ -317,10 +358,12 @@ impl Source {
         options: Options,
         min_quality: f64,
         max_bytes: usize,
+        detailed: bool,
         runner: &Option<ThreadsRunner<'_>>,
         mut visit: impl FnMut(Output),
     ) -> Result<()> {
-        let (lossless, lossy) = options.format.settings();
+        let lossless = options.format.lossless_setting();
+        let lossy = options.format.compression_settings(detailed);
         let reference = raster::QualityReference::new(&self.0);
         probe_compression(
             &self.0,
@@ -345,7 +388,7 @@ impl Source {
                     break;
                 };
                 previous_dimensions = image.dimensions();
-                let candidate = lossless_output(&image, quality, lossless, runner)?;
+                let candidate = encode_output(&image, quality, lossless, runner)?;
                 if candidate.bytes.len() <= max_bytes {
                     visit(candidate);
                 }
@@ -386,6 +429,64 @@ impl Source {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Candidate {
+    setting: Setting,
+    dimensions: (u32, u32),
+    quality: f64,
+    bytes: usize,
+}
+
+impl From<&Output> for Candidate {
+    fn from(output: &Output) -> Self {
+        Self {
+            setting: output.setting,
+            dimensions: output.dimensions,
+            quality: output.quality,
+            bytes: output.bytes.len(),
+        }
+    }
+}
+
+fn economical_candidate(candidates: &[Candidate], mode: OptimizationMode) -> Option<Candidate> {
+    let cheap = candidates.iter().min_by(|a, b| {
+        a.bytes
+            .cmp(&b.bytes)
+            .then_with(|| b.quality.total_cmp(&a.quality))
+    })?;
+    if mode == OptimizationMode::Cheap {
+        return Some(*cheap);
+    }
+    let highest = candidates.iter().max_by(|a, b| {
+        a.quality
+            .total_cmp(&b.quality)
+            .then_with(|| b.bytes.cmp(&a.bytes))
+    })?;
+    if highest.quality <= cheap.quality || highest.bytes <= cheap.bytes {
+        return Some(*cheap);
+    }
+
+    // Normalize the available trade-off per image, with equal weight on quality
+    // and proportional size savings.
+    let quality_span = highest.quality - cheap.quality;
+    let size_span = (highest.bytes as f64 / cheap.bytes as f64).ln();
+    let distance = |candidate: &Candidate| {
+        let quality = (highest.quality - candidate.quality) / quality_span;
+        let size = (candidate.bytes as f64 / cheap.bytes as f64).ln() / size_span;
+        quality * quality + size * size
+    };
+    candidates
+        .iter()
+        .filter(|candidate| candidate.bytes <= highest.bytes && candidate.quality >= cheap.quality)
+        .min_by(|a, b| {
+            distance(a)
+                .total_cmp(&distance(b))
+                .then_with(|| b.quality.total_cmp(&a.quality))
+                .then_with(|| a.bytes.cmp(&b.bytes))
+        })
+        .copied()
+}
+
 fn accepted_quality(similarity: Option<raster::Similarity>, min_quality: f64) -> Option<f64> {
     let max_block_error = (100.0 - min_quality) * BLOCK_ERROR_PER_POINT;
     similarity
@@ -393,7 +494,7 @@ fn accepted_quality(similarity: Option<raster::Similarity>, min_quality: f64) ->
         .map(|value| value.score)
 }
 
-fn lossless_output(
+fn encode_output(
     image: &RgbaImage,
     quality: f64,
     setting: Setting,
@@ -445,16 +546,6 @@ fn probe_compression(
         });
     }
     Ok(())
-}
-
-fn round_trip(
-    image: &RgbaImage,
-    setting: Setting,
-    runner: &Option<ThreadsRunner<'_>>,
-) -> Result<(Vec<u8>, RgbaImage)> {
-    let bytes = setting.encode(image, runner)?;
-    let decoded = decode_candidate(&bytes, image.dimensions(), setting, runner)?;
-    Ok((bytes, decoded))
 }
 
 fn decode_candidate(
@@ -544,6 +635,21 @@ mod tests {
     }
 
     #[test]
+    fn balance_trades_similarity_for_space_and_cheap_picks_the_smallest() {
+        let candidates = [(100.0, 1024), (92.0, 512), (80.0, 256), (81.0, 768)]
+            .map(|(quality, bytes)| Candidate {
+                setting: Setting::Jxl(1.0),
+                dimensions: (96, 64),
+                quality,
+                bytes,
+            });
+        let balance = economical_candidate(&candidates, OptimizationMode::Balance).unwrap();
+        let cheap = economical_candidate(&candidates, OptimizationMode::Cheap).unwrap();
+        assert_eq!((balance.quality, balance.bytes), (92.0, 512));
+        assert_eq!((cheap.quality, cheap.bytes), (80.0, 256));
+    }
+
+    #[test]
     fn optimization_keeps_lossless_when_it_saves_space() {
         let source = sample();
         for format in OutputFormat::ALL {
@@ -559,12 +665,6 @@ mod tests {
             assert!(optimized.setting.is_lossless());
             assert_eq!(optimized.bytes.len(), baseline.bytes.len());
             assert!(source.optimize(options, 1).unwrap().is_none());
-            assert!(matches!(
-                source
-                    .quality_test_with_source_size(options, baseline.bytes.len())
-                    .encode(100),
-                Err(Error::TestSizeLimit)
-            ));
         }
     }
 

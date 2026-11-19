@@ -1,6 +1,7 @@
 mod comparison;
 mod jobs;
 mod language;
+mod theme;
 
 use std::{
     path::{Path, PathBuf},
@@ -9,16 +10,10 @@ use std::{
     time::Duration,
 };
 
-use eframe::egui::{
-    self, Button, ColorImage, ComboBox, Context, Grid, RichText, ScrollArea, TextureHandle,
-    ThemePreference, Ui, Vec2,
-};
-use jobs::{Conversion, Event, Failure, TestResult};
+use eframe::egui::{self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui};
+use jobs::{Conversion, Event, Failure};
 use language::{Catalog, LANGUAGES};
-use tenka_core::{Options, OutputFormat, Setting};
-
-const MAX_TEST_QUALITIES: usize = 11;
-const INITIAL_TEST_QUALITY: u8 = 100;
+use tenka_core::{OptimizationMode, Options, OutputFormat};
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -46,12 +41,6 @@ fn main() -> eframe::Result {
     )
 }
 
-#[derive(PartialEq)]
-enum Tab {
-    Convert,
-    Tests,
-}
-
 enum Status {
     Pending,
     Running,
@@ -63,27 +52,15 @@ struct QueueEntry {
     status: Status,
 }
 
-struct TestRow {
-    quality: u8,
-    outcome: Result<TestResult, Failure>,
-}
-
 struct Tenka {
-    tab: Tab,
     language: String,
     theme: ThemePreference,
+    system_theme: theme::SystemTheme,
     catalog: Catalog,
     queue: Vec<QueueEntry>,
     folder: Option<PathBuf>,
     conversion: Options,
-    test_file: Option<PathBuf>,
-    test_qualities: Vec<u8>,
-    test_options: Options,
-    test_folder: Option<PathBuf>,
-    test_rows: Vec<TestRow>,
-    original: Option<(TextureHandle, String)>,
-    preview: Option<(usize, TextureHandle)>,
-    test_failure: Option<Failure>,
+    mode: OptimizationMode,
     folder_failure: Option<Failure>,
     worker: Option<Receiver<Event>>,
     comparison_windows: Vec<Child>,
@@ -121,24 +98,14 @@ impl Tenka {
             });
         }
         Self {
-            tab: Tab::Convert,
             catalog: Catalog::new(&language),
             language,
             theme,
+            system_theme: theme::SystemTheme::new(&context.egui_ctx),
             queue: Vec::new(),
             folder: None,
             conversion: Options::default(),
-            test_file: None,
-            test_qualities: vec![INITIAL_TEST_QUALITY],
-            test_options: Options {
-                auto_resize: true,
-                ..Options::default()
-            },
-            test_folder: None,
-            test_rows: Vec::new(),
-            original: None,
-            preview: None,
-            test_failure: None,
+            mode: OptimizationMode::default(),
             folder_failure: None,
             worker: None,
             comparison_windows: Vec::new(),
@@ -160,17 +127,9 @@ impl Tenka {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
-                    if ui
-                        .selectable_label(self.tab == Tab::Convert, self.label(1))
-                        .clicked()
-                    {
-                        self.tab = Tab::Convert;
-                    }
-                    if ui
-                        .selectable_label(self.tab == Tab::Tests, self.label(2))
-                        .clicked()
-                    {
-                        self.tab = Tab::Tests;
+                    ui.selectable_label(true, self.label(1));
+                    if ui.button(self.label(109)).clicked() {
+                        self.open_comparison();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let theme_label =
@@ -193,7 +152,7 @@ impl Tenka {
                             .response
                             .on_hover_text(self.label(4));
                         if self.theme != previous_theme {
-                            context.set_theme(self.theme);
+                            self.system_theme.apply(context, self.theme);
                         }
 
                         let system = self.label(5);
@@ -252,10 +211,22 @@ impl Tenka {
             ui.add_enabled_ui(!busy, |ui| {
                 format_picker(
                     ui,
-                    "output_format",
                     self.label(73),
                     &mut self.conversion.format,
                 );
+                ui.horizontal(|ui| {
+                    ui.label(self.label(110));
+                    for (mode, label, hint) in [
+                        (OptimizationMode::Best, 111, 114),
+                        (OptimizationMode::Balance, 112, 115),
+                        (OptimizationMode::Cheap, 113, 116),
+                    ] {
+                        let label = self.label(label);
+                        let hint = self.label(hint);
+                        ui.selectable_value(&mut self.mode, mode, label)
+                            .on_hover_text(hint);
+                    }
+                });
                 let resize = self.label(74);
                 ui.checkbox(&mut self.conversion.auto_resize, resize)
                     .on_hover_text(self.label(75));
@@ -290,13 +261,13 @@ impl Tenka {
                     entries,
                     self.folder.clone(),
                     self.conversion,
+                    self.mode,
                 ));
             }
             if pending > 0 {
                 ui.weak(format!("{}  {pending}", self.label(68)));
             }
-            if matches!(self.tab, Tab::Convert)
-                && busy
+            if busy
                 && self
                     .queue
                     .iter()
@@ -306,6 +277,9 @@ impl Tenka {
             }
         });
         if let Some(error) = &self.folder_failure {
+            self.show_error(ui, error);
+        }
+        if let Some(error) = &self.comparison_failure {
             self.show_error(ui, error);
         }
         ui.separator();
@@ -404,225 +378,6 @@ impl Tenka {
         }
     }
 
-    fn show_tests(&mut self, ui: &mut Ui) {
-        ui.heading(self.label(88));
-        let busy = self.worker.is_some();
-        section(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                let format_changed = format_picker(
-                    ui,
-                    "test_format",
-                    self.label(73),
-                    &mut self.test_options.format,
-                );
-                let quality_changed = ui
-                    .horizontal_wrapped(|ui| {
-                        ui.label(self.label(82));
-                        let mut changed = false;
-                        if ui
-                            .add_enabled(
-                                self.test_qualities.len() < MAX_TEST_QUALITIES,
-                                Button::new("+"),
-                            )
-                            .on_hover_text(self.label(91))
-                            .clicked()
-                        {
-                            let next = self
-                                .test_qualities
-                                .last()
-                                .copied()
-                                .unwrap_or(INITIAL_TEST_QUALITY);
-                            self.test_qualities.push(next.saturating_sub(2).max(1));
-                            changed = true;
-                        }
-                        if ui
-                            .add_enabled(self.test_qualities.len() > 1, Button::new("-"))
-                            .on_hover_text(self.label(92))
-                            .clicked()
-                        {
-                            self.test_qualities.pop();
-                            changed = true;
-                        }
-                        let hint = self.label(87);
-                        for (index, quality) in self.test_qualities.iter_mut().enumerate() {
-                            changed |= ui
-                                .push_id(index, |ui| {
-                                    ui.add(egui::DragValue::new(quality).range(1_u8..=100))
-                                        .on_hover_text(hint)
-                                        .changed()
-                                })
-                                .inner;
-                        }
-                        changed
-                    })
-                    .inner;
-                let resize = self.label(74);
-                let resize_changed = ui
-                    .checkbox(&mut self.test_options.auto_resize, resize)
-                    .changed();
-                if format_changed || quality_changed || resize_changed {
-                    self.clear_test_results();
-                }
-            });
-        });
-        folder_picker(ui, &self.catalog, &mut self.test_folder, busy);
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, Button::new(self.label(32))).clicked()
-                && let Some(file) = self.picker().pick_file()
-            {
-                self.set_test_file(file);
-            }
-            if ui
-                .add_enabled(
-                    !busy && self.test_file.is_some(),
-                    Button::new(self.label(89)),
-                )
-                .clicked()
-                && let Some(file) = self.test_file.clone()
-            {
-                self.clear_test_results();
-                self.worker = Some(jobs::test_qualities(
-                    ui.ctx(),
-                    file,
-                    self.test_folder.clone(),
-                    self.test_options,
-                    self.test_qualities.clone(),
-                ));
-            }
-            if busy
-                && !self
-                    .queue
-                    .iter()
-                    .any(|e| matches!(e.status, Status::Running))
-            {
-                ui.spinner();
-                ui.label(format!(
-                    "{} {}/{}",
-                    self.label(93),
-                    self.test_rows.len(),
-                    self.test_qualities.len()
-                ));
-            }
-        });
-        if ui.button(self.label(99)).clicked() {
-            self.open_comparison();
-        }
-        if let Some(error) = &self.comparison_failure {
-            self.show_error(ui, error);
-        }
-        if let Some(file) = &self.test_file {
-            ui.strong(file_name(file)).on_hover_text(path_label(file));
-        } else {
-            ui.weak(self.label(90));
-        }
-        if let Some(error) = &self.test_failure {
-            self.show_error(ui, error);
-        }
-        if self.test_rows.is_empty() {
-            return;
-        }
-        ui.separator();
-
-        ScrollArea::vertical().show(ui, |ui| {
-            let mut selection = None;
-            ScrollArea::horizontal().show(ui, |ui| {
-                Grid::new("measurements")
-                    .num_columns(6)
-                    .striped(true)
-                    .max_col_width(200.0)
-                    .spacing([14.0, 5.0])
-                    .show(ui, |ui| {
-                        for id in [94, 37, 38, 83, 85, 84] {
-                            ui.strong(self.label(id));
-                        }
-                        ui.end_row();
-                        for (index, row) in self.test_rows.iter().enumerate() {
-                            let quality = format!("{}%", row.quality);
-                            let selected =
-                                self.preview.as_ref().is_some_and(|(idx, _)| *idx == index);
-                            match &row.outcome {
-                                Ok(result) => {
-                                    ui.vertical(|ui| {
-                                        if ui.selectable_label(selected, &quality).clicked() {
-                                            selection = Some((index, &result.preview));
-                                        }
-                                        ui.add(
-                                            egui::Label::new(file_name(&result.path)).truncate(),
-                                        )
-                                        .on_hover_text(path_label(&result.path));
-                                    });
-                                    let setting = match result.setting {
-                                        Setting::Jxl(value) => {
-                                            format!("{} {value}", self.label(64))
-                                        }
-                                        Setting::Webp(value) => {
-                                            format!("{} {value}", self.label(39))
-                                        }
-                                        Setting::JxlLossless | Setting::WebpLossless => {
-                                            self.label(if result.resized { 106 } else { 17 }).into()
-                                        }
-                                    };
-                                    ui.label(if result.resized && !result.setting.is_lossless() {
-                                        format!("{} + {setting}", self.label(106))
-                                    } else {
-                                        setting
-                                    });
-                                    ui.label(size(result.bytes));
-                                    ui.label(dimensions_text(result.dimensions));
-                                    ui.label(format!("{:.1}%", result.quality));
-                                    ui.label(format!("{:.0} ms", result.milliseconds));
-                                }
-                                Err(error) => {
-                                    ui.label(quality);
-                                    self.show_error(ui, error);
-                                    for _ in 0..4 {
-                                        ui.weak("—");
-                                    }
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-            if let Some((index, pixels)) = selection {
-                self.preview = Some((index, texture(ui.ctx(), "encoded", pixels.clone())));
-            }
-            ui.weak(self.label(47));
-            ui.separator();
-            if let (Some((original, dimensions)), Some((index, encoded))) =
-                (&self.original, &self.preview)
-                && let Ok(result) = &self.test_rows[*index].outcome
-            {
-                ui.columns(2, |columns| {
-                    let original_size = original.size_vec2();
-                    let width = columns[0]
-                        .available_width()
-                        .min(columns[1].available_width());
-                    let scale = (width / original_size.x)
-                        .min(260.0 / original_size.y)
-                        .min(1.0);
-                    let preview_size = original_size * scale;
-                    show_preview(
-                        &mut columns[0],
-                        original,
-                        self.label(44),
-                        dimensions,
-                        preview_size,
-                    );
-                    show_preview(
-                        &mut columns[1],
-                        encoded,
-                        self.label(45),
-                        &dimensions_text(result.dimensions),
-                        preview_size,
-                    );
-                });
-            } else {
-                ui.weak(self.label(46));
-            }
-        });
-    }
-
     fn picker(&self) -> rfd::FileDialog {
         rfd::FileDialog::new().add_filter(self.label(65), &["jpg", "jpeg", "png", "webp"])
     }
@@ -638,40 +393,13 @@ impl Tenka {
         }
     }
 
-    fn set_test_file(&mut self, file: PathBuf) {
-        self.test_file = Some(file);
-        self.clear_test_results();
-    }
-
-    fn clear_test_results(&mut self) {
-        self.test_rows.clear();
-        self.original = None;
-        self.preview = None;
-        self.test_failure = None;
-    }
-
-    fn poll_worker(&mut self, context: &Context) {
+    fn poll_worker(&mut self) {
         while let Some(worker) = &self.worker {
             match worker.try_recv() {
                 Ok(Event::Started(index)) => self.queue[index].status = Status::Running,
                 Ok(Event::Converted(index, result)) => {
                     self.queue[index].status = Status::Done(result)
                 }
-                Ok(Event::Original(pixels, dimensions)) => {
-                    self.original = Some((texture(context, "original", pixels), dimensions));
-                }
-                Ok(Event::Tested(quality, outcome)) => {
-                    if self.preview.is_none()
-                        && let Ok(result) = &outcome
-                    {
-                        self.preview = Some((
-                            self.test_rows.len(),
-                            texture(context, "encoded", result.preview.clone()),
-                        ));
-                    }
-                    self.test_rows.push(TestRow { quality, outcome });
-                }
-                Ok(Event::Failed(error)) => self.test_failure = Some(error),
                 Ok(Event::Finished) => self.worker = None,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -686,7 +414,7 @@ impl Tenka {
                         }
                     }
                     if !conversion {
-                        self.test_failure = Some(Failure {
+                        self.folder_failure = Some(Failure {
                             label: 61,
                             detail: String::new(),
                         });
@@ -748,7 +476,8 @@ impl Tenka {
 
 impl eframe::App for Tenka {
     fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
-        self.poll_worker(context);
+        self.system_theme.apply(context, self.theme);
+        self.poll_worker();
         if self.worker.is_none() {
             let files = context.input(|input| {
                 input
@@ -758,14 +487,7 @@ impl eframe::App for Tenka {
                     .filter_map(|file| file.path.clone())
                     .collect::<Vec<_>>()
             });
-            match self.tab {
-                Tab::Convert => self.add_files(files),
-                Tab::Tests => {
-                    if let Some(file) = files.into_iter().next() {
-                        self.set_test_file(file);
-                    }
-                }
-            }
+            self.add_files(files);
         }
         self.header(context);
         egui::CentralPanel::default()
@@ -773,10 +495,7 @@ impl eframe::App for Tenka {
                 egui::Frame::central_panel(&context.style())
                     .inner_margin(egui::Margin::symmetric(20, 15)),
             )
-            .show(context, |ui| match self.tab {
-                Tab::Convert => self.show_convert(ui),
-                Tab::Tests => self.show_tests(ui),
-            });
+            .show(context, |ui| self.show_convert(ui));
         self.poll_comparison_windows(context);
     }
 
@@ -837,11 +556,10 @@ fn folder_picker(ui: &mut Ui, catalog: &Catalog, folder: &mut Option<PathBuf>, b
     });
 }
 
-fn format_picker(ui: &mut Ui, id: &str, label: &str, format: &mut OutputFormat) -> bool {
-    let previous = *format;
+fn format_picker(ui: &mut Ui, label: &str, format: &mut OutputFormat) {
     ui.horizontal(|ui| {
         ui.label(label);
-        ComboBox::from_id_salt(id)
+        ComboBox::from_id_salt("output_format")
             .selected_text(format.name())
             .width(164.0)
             .show_ui(ui, |ui| {
@@ -850,7 +568,6 @@ fn format_picker(ui: &mut Ui, id: &str, label: &str, format: &mut OutputFormat) 
                 }
             });
     });
-    previous != *format
 }
 
 fn section(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
@@ -879,18 +596,4 @@ fn size(bytes: usize) -> String {
     } else {
         format!("{:.1} KiB", bytes as f64 / 1024.0)
     }
-}
-
-fn texture(context: &Context, name: &str, pixels: ColorImage) -> TextureHandle {
-    context.load_texture(name, pixels, egui::TextureOptions::LINEAR)
-}
-
-fn dimensions_text((width, height): (u32, u32)) -> String {
-    format!("{width} × {height}")
-}
-
-fn show_preview(ui: &mut Ui, texture: &TextureHandle, label: &str, dimensions: &str, size: Vec2) {
-    ui.strong(label);
-    ui.weak(dimensions);
-    ui.add(egui::Image::new(texture).fit_to_exact_size(size));
 }

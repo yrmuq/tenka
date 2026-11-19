@@ -4,18 +4,14 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
-    time::Instant,
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
-use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, QualityTest, Setting, Source};
+use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source};
 
 pub enum Event {
     Started(usize),
     Converted(usize, Result<Option<Conversion>, Failure>),
-    Original(ColorImage, String),
-    Tested(u8, Result<TestResult, Failure>),
-    Failed(Failure),
     Finished,
 }
 
@@ -26,17 +22,6 @@ pub struct Conversion {
     pub dimensions: (u32, u32),
     pub quality: f64,
     pub lossless: bool,
-}
-
-pub struct TestResult {
-    pub path: PathBuf,
-    pub setting: Setting,
-    pub bytes: usize,
-    pub dimensions: (u32, u32),
-    pub resized: bool,
-    pub quality: f64,
-    pub milliseconds: f64,
-    pub preview: ColorImage,
 }
 
 pub struct ComparisonPixels {
@@ -71,8 +56,6 @@ impl From<tenka_core::Error> for Failure {
             QualitySample => 80,
             CandidateDimensions => 81,
             QualityRange(_) => 86,
-            QualityCeiling(_) => 105,
-            TestSizeLimit => 108,
         };
         Self {
             label,
@@ -86,52 +69,14 @@ pub fn convert(
     files: Vec<(usize, PathBuf)>,
     output_folder: Option<PathBuf>,
     options: Options,
+    mode: OptimizationMode,
 ) -> Receiver<Event> {
     run(context, move |emit| {
         for (idx, path) in files {
             emit(Event::Started(idx));
             emit(Event::Converted(
                 idx,
-                convert_one(&path, output_folder.as_deref(), options),
-            ));
-        }
-    })
-}
-
-pub fn test_qualities(
-    context: &Context,
-    file: PathBuf,
-    folder: Option<PathBuf>,
-    options: Options,
-    qualities: Vec<u8>,
-) -> Receiver<Event> {
-    run(context, move |emit| {
-        let input = read_image(&file).and_then(|bytes| Ok((Source::decode(&bytes)?, bytes.len())));
-        let (source, source_bytes) = match input {
-            Ok(result) => result,
-            Err(error) => {
-                emit(Event::Failed(error));
-                return;
-            }
-        };
-        let (width, height) = source.dimensions();
-        let thumbnail = source.preview();
-        let original = ColorImage::from_rgba_unmultiplied(
-            [thumbnail.width() as usize, thumbnail.height() as usize],
-            thumbnail.as_raw(),
-        );
-        emit(Event::Original(original, format!("{width} × {height}")));
-        let mut test = source.quality_test_with_source_size(options, source_bytes);
-        for quality in qualities {
-            emit(Event::Tested(
-                quality,
-                test_one(
-                    &mut test,
-                    &file,
-                    folder.as_deref(),
-                    quality,
-                    (width, height),
-                ),
+                convert_one(&path, output_folder.as_deref(), options, mode),
             ));
         }
     })
@@ -191,39 +136,6 @@ pub fn load_comparison(
     receive
 }
 
-fn test_one(
-    test: &mut QualityTest<'_>,
-    file: &Path,
-    folder: Option<&Path>,
-    ceiling: u8,
-    source_dimensions: (u32, u32),
-) -> Result<TestResult, Failure> {
-    let start = Instant::now();
-    let result = test.encode(ceiling)?;
-    let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
-    let thumbnail = result.preview()?;
-    let path = save_image(
-        file,
-        folder,
-        result.setting.format(),
-        Some(ceiling),
-        &result.bytes,
-    )?;
-    Ok(TestResult {
-        path,
-        setting: result.setting,
-        bytes: result.bytes.len(),
-        dimensions: result.dimensions,
-        resized: result.dimensions != source_dimensions,
-        quality: result.quality,
-        milliseconds,
-        preview: ColorImage::from_rgba_unmultiplied(
-            [thumbnail.width() as usize, thumbnail.height() as usize],
-            thumbnail.as_raw(),
-        ),
-    })
-}
-
 fn run(context: &Context, work: impl FnOnce(&dyn Fn(Event)) + Send + 'static) -> Receiver<Event> {
     let context = context.clone();
     let (send, receive) = mpsc::channel();
@@ -243,13 +155,14 @@ fn convert_one(
     path: &Path,
     folder: Option<&Path>,
     options: Options,
+    mode: OptimizationMode,
 ) -> Result<Option<Conversion>, Failure> {
     let bytes = read_image(path)?;
     let source = Source::decode(&bytes)?;
-    let Some(output) = source.optimize(options, bytes.len())? else {
+    let Some(output) = source.optimize_with_mode(options, bytes.len(), mode)? else {
         return Ok(None);
     };
-    let path = save_image(path, folder, output.setting.format(), None, &output.bytes)?;
+    let path = save_image(path, folder, output.setting.format(), &output.bytes)?;
     Ok(Some(Conversion {
         path,
         source_bytes: bytes.len(),
@@ -284,7 +197,6 @@ fn save_image(
     source: &Path,
     folder: Option<&Path>,
     format: OutputFormat,
-    quality_suffix: Option<u8>,
     bytes: &[u8],
 ) -> Result<PathBuf, Failure> {
     let folder = folder
@@ -301,14 +213,10 @@ fn save_image(
     };
     let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(|error| failed(96, error))?;
     temp.write_all(bytes).map_err(|error| failed(97, error))?;
-    let suffix = quality_suffix.map(|value| format!("-{value}"));
     for i in 0..1000 {
         let mut name = OsString::from(stem);
         if i > 0 {
             name.push(format!("-{i}"));
-        }
-        if let Some(suffix) = &suffix {
-            name.push(suffix);
         }
         name.push(".");
         name.push(format.extension());
@@ -334,89 +242,14 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let input = folder.path().join("image.webp");
         fs::write(&input, b"input").unwrap();
-        let first = save_image(&input, None, OutputFormat::Webp, None, b"one").unwrap();
-        let second = save_image(&input, None, OutputFormat::Webp, None, b"two").unwrap();
+        let first = save_image(&input, None, OutputFormat::Webp, b"one").unwrap();
+        let second = save_image(&input, None, OutputFormat::Webp, b"two").unwrap();
         assert_eq!(fs::read(input).unwrap(), b"input");
         assert_eq!(first.file_name().unwrap(), "image-1.webp");
         assert_eq!(fs::read(first).unwrap(), b"one");
         assert_eq!(second.file_name().unwrap(), "image-2.webp");
         assert_eq!(fs::read(&second).unwrap(), b"two");
-        let jxl = save_image(&second, None, OutputFormat::JpegXl, None, b"three").unwrap();
+        let jxl = save_image(&second, None, OutputFormat::JpegXl, b"three").unwrap();
         assert_eq!(jxl.file_name().unwrap(), "image-2.jxl");
-    }
-
-    #[test]
-    fn quality_batch_writes_only_the_selected_format_without_overwriting() {
-        let root = tempfile::tempdir().unwrap();
-        let destination = tempfile::tempdir().unwrap();
-        let input = root.path().join("image.png");
-        let png = [
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 176, 113,
-            11, 0, 0, 1, 148, 0, 211, 246, 194, 60, 171, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
-            130,
-        ];
-        fs::write(&input, png).unwrap();
-        let existing = destination.path().join("image-100.webp");
-        fs::write(&existing, b"existing output").unwrap();
-
-        for (format, folder, expected_path) in [
-            (OutputFormat::JpegXl, None, "image-100.jxl"),
-            (
-                OutputFormat::Webp,
-                Some(destination.path().to_owned()),
-                "image-1-100.webp",
-            ),
-        ] {
-            let expected_folder = folder.as_deref().unwrap_or(root.path()).to_owned();
-            let events = test_qualities(
-                &Context::default(),
-                input.clone(),
-                folder,
-                Options {
-                    format,
-                    ..Options::default()
-                },
-                vec![87, 100],
-            );
-            let mut saved = Vec::new();
-            let mut rejected = false;
-            loop {
-                match events
-                    .recv_timeout(std::time::Duration::from_secs(10))
-                    .unwrap()
-                {
-                    Event::Tested(87, Err(error)) => {
-                        assert_eq!(error.label, 105);
-                        rejected = true;
-                    }
-                    Event::Tested(quality, result) => {
-                        let result = result.unwrap();
-                        assert_eq!(result.setting.format(), format);
-                        assert!(result.setting.is_lossless());
-                        assert_eq!(result.path.parent(), Some(expected_folder.as_path()));
-                        assert_eq!(
-                            fs::metadata(&result.path).unwrap().len(),
-                            result.bytes as u64
-                        );
-                        saved.push((quality, result.path));
-                    }
-                    Event::Original(..) => {}
-                    Event::Finished => break,
-                    _ => panic!("unexpected event during quality batch"),
-                }
-            }
-            assert!(rejected);
-            assert_eq!(saved, vec![(100, expected_folder.join(expected_path))]);
-            assert!(
-                !expected_folder
-                    .join(format!("image-87.{}", format.extension()))
-                    .exists()
-            );
-        }
-        assert_eq!(fs::read(existing).unwrap(), b"existing output");
-        assert_eq!(fs::read(input).unwrap(), png);
-        assert!(!root.path().join("image-100.webp").exists());
-        assert!(!destination.path().join("image-100.jxl").exists());
     }
 }
