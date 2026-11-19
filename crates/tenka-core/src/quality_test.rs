@@ -32,7 +32,11 @@ struct Probe {
 }
 
 impl<'a> QualityTest<'a> {
-    pub(crate) fn new(original: &'a RgbaImage, options: Options, source_bytes: Option<usize>) -> Self {
+    pub(crate) fn new(
+        original: &'a RgbaImage,
+        options: Options,
+        source_bytes: Option<usize>,
+    ) -> Self {
         Self {
             original,
             options,
@@ -112,7 +116,13 @@ impl<'a> QualityTest<'a> {
         self.encode_best(ceiling, lossless, max_bytes)
     }
 
-    fn probe_side(&mut self, side: u32, original_side: u32, cap: f64, max_bytes: usize) -> Result<()> {
+    fn probe_side(
+        &mut self,
+        side: u32,
+        original_side: u32,
+        cap: f64,
+        max_bytes: usize,
+    ) -> Result<()> {
         let image = LazyCell::new(|| raster::limit_size(self.original, side));
         let reference = self
             .reference
@@ -193,9 +203,9 @@ impl<'a> QualityTest<'a> {
         candidates.sort_unstable_by_key(|(_, probe)| Reverse(displayed_tenths(probe.quality)));
         let mut best: Option<(ProbeKey, usize, f64)> = None;
         for (key, probe) in candidates {
-            if best
-                .is_some_and(|(_, _, score)| displayed_tenths(probe.quality) < displayed_tenths(score))
-            {
+            if best.is_some_and(|(_, _, score)| {
+                displayed_tenths(probe.quality) < displayed_tenths(score)
+            }) {
                 break;
             }
             // Resize-only candidates need encoding only when their score competes for first place.

@@ -106,8 +106,7 @@ pub fn test_qualities(
     qualities: Vec<u8>,
 ) -> Receiver<Event> {
     run(context, move |emit| {
-        let input =
-            read_image(&file).and_then(|bytes| Ok((Source::decode(&bytes)?, bytes.len())));
+        let input = read_image(&file).and_then(|bytes| Ok((Source::decode(&bytes)?, bytes.len())));
         let (source, source_bytes) = match input {
             Ok(result) => result,
             Err(error) => {
