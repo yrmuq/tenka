@@ -7,7 +7,7 @@ pub(crate) fn globe(ui: &mut Ui, label: &str) -> Response {
     let response = icon_button(ui, label);
     let center = response.rect.center();
     let painter = ui.painter();
-    let stroke = Stroke::new(1.3, ui.visuals().text_color());
+    let stroke = Stroke::new(1.3_f32, ui.visuals().text_color());
     painter.circle_stroke(center, 8.0, stroke);
     painter.line_segment([center - vec2(8.0, 0.0), center + vec2(8.0, 0.0)], stroke);
     let meridians = (0..24)
@@ -53,7 +53,7 @@ pub(crate) fn theme(ui: &mut Ui, preference: ThemePreference, label: &str) -> Re
     }
     painter.add(Shape::closed_line(
         outline.to_vec(),
-        Stroke::new(1.1, foreground),
+        Stroke::new(1.1_f32, foreground),
     ));
     if preference == ThemePreference::System {
         painter.text(

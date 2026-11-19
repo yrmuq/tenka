@@ -83,11 +83,11 @@ jobs:
                 --appimage-extract-and-run "${args[@]}" >"$log" 2>&1 &
               app=$!
               for attempt in {1..100}; do
-                if grep -qE "xdg_surface@[0-9]+\.ack_configure" "$log"; then break; fi
+                if grep -qE "xdg_surface[@#][0-9]+\.ack_configure" "$log"; then break; fi
                 if ! kill -0 "$app" 2>/dev/null; then break; fi
                 sleep 0.1
               done
-              if ! grep -qE "xdg_surface@[0-9]+\.ack_configure" "$log" || ! kill -0 "$app"; then
+              if ! grep -qE "xdg_surface[@#][0-9]+\.ack_configure" "$log" || ! kill -0 "$app"; then
                 cat "$XDG_RUNTIME_DIR/weston.log" "$log"
                 exit 1
               fi
