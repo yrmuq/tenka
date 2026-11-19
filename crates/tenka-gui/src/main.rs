@@ -24,6 +24,7 @@ use language::Catalog;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
+const MAIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 650.0);
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
@@ -45,13 +46,11 @@ fn main() -> eframe::Result {
             .with_app_id("io.github.yrmuq.tenka")
             .with_icon(icon),
         window_builder: Some(Box::new(|window| {
-            let size = [960.0, 650.0];
             // Override the size and maximized state saved by resizable versions.
             window
-                .with_inner_size(size)
-                .with_min_inner_size(size)
-                .with_max_inner_size(size)
-                .with_resizable(false)
+                .with_inner_size(MAIN_WINDOW_SIZE)
+                .with_min_inner_size(MAIN_WINDOW_SIZE)
+                .with_max_inner_size(MAIN_WINDOW_SIZE)
                 .with_maximized(false)
                 .with_maximize_button(false)
         })),
@@ -118,6 +117,10 @@ struct Tenka {
 
 impl Tenka {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
+        // Winit creates its Wayland decoration frame after applying startup size hints.
+        context
+            .egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Resizable(false));
         let read = |key| context.storage.and_then(|storage| storage.get_string(key));
         let language = read("language")
             .filter(|value| value == "en")
@@ -792,6 +795,24 @@ impl Tenka {
 
 impl eframe::App for Tenka {
     fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
+        let size_change = context.input(|input| {
+            let window = input.viewport();
+            if window.fullscreen == Some(true) {
+                Some(egui::ViewportCommand::Fullscreen(false))
+            } else if window.maximized == Some(true) {
+                Some(egui::ViewportCommand::Maximized(false))
+            } else if window
+                .inner_rect
+                .is_some_and(|rect| (rect.size() - MAIN_WINDOW_SIZE).abs().max_elem() > 1.0)
+            {
+                Some(egui::ViewportCommand::InnerSize(MAIN_WINDOW_SIZE))
+            } else {
+                None
+            }
+        });
+        if let Some(command) = size_change {
+            context.send_viewport_cmd(command);
+        }
         self.system_theme.apply(context, self.theme);
         self.poll_worker();
         self.add_files(self.file_drops.take(context));
