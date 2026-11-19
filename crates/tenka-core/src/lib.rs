@@ -4,6 +4,7 @@ mod jxl_header;
 mod raster;
 
 use std::{
+    io::{BufRead, Seek},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -244,6 +245,15 @@ pub fn decode_for_comparison(bytes: &[u8]) -> Result<RgbaImage> {
 pub struct Source(RgbaImage);
 
 impl Source {
+    /// Read the dimensions of a supported input without decoding its pixels.
+    pub fn probe_dimensions(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
+        let size = imagesize::reader_size(reader).ok()?;
+        let width = u32::try_from(size.width).ok()?;
+        let height = u32::try_from(size.height).ok()?;
+        raster::check_dimensions(width, height).ok()?;
+        (width != 0 && height != 0).then_some((width, height))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_INPUT_BYTES {
             return Err(Error::Limits);
@@ -697,6 +707,18 @@ fn decode_jxl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dimensions_are_available_from_a_png_header_without_image_data() {
+        let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        header.extend_from_slice(&640_u32.to_be_bytes());
+        header.extend_from_slice(&480_u32.to_be_bytes());
+        assert_eq!(
+            Source::probe_dimensions(std::io::Cursor::new(&header)),
+            Some((640, 480))
+        );
+        assert!(Source::decode(&header).is_err());
+    }
 
     fn sample() -> Source {
         Source(RgbaImage::from_fn(48, 32, |x, y| {

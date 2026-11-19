@@ -1,4 +1,5 @@
 mod comparison;
+mod estimate;
 mod file_drop;
 mod icons;
 mod jobs;
@@ -6,14 +7,14 @@ mod language;
 mod theme;
 
 use std::{
-    collections::VecDeque,
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, TryRecvError},
+        mpsc::{Receiver, Sender, TryRecvError},
     },
     time::Duration,
 };
@@ -22,8 +23,9 @@ use eframe::egui::{
     self, Button, ComboBox, Context, Rect, RichText, ScrollArea, ThemePreference, Ui,
     scroll_area::ScrollBarVisibility,
 };
+use estimate::{Estimate, InputSize};
 use file_drop::FileDrops;
-use jobs::{Conversion, Event, Failure};
+use jobs::{Conversion, Event, Failure, InputProbe};
 use language::Catalog;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
 
@@ -75,31 +77,28 @@ enum Status {
 
 struct QueueEntry {
     path: PathBuf,
+    size: Arc<OnceLock<InputSize>>,
     status: Status,
 }
 
 struct Batch {
     events: Receiver<Event>,
     cancelled: Arc<AtomicBool>,
-    remaining: usize,
-    recent: VecDeque<Duration>,
+    queue_end: usize,
+    estimate: Estimate,
 }
 
 impl Batch {
-    fn record(&mut self, elapsed: Duration) {
-        self.remaining -= 1;
-        if self.recent.len() == 10 {
-            self.recent.pop_front();
-        }
-        self.recent.push_back(elapsed);
-    }
-
-    fn estimate_seconds(&self) -> Option<u64> {
-        if self.remaining == 0 || self.recent.is_empty() || self.cancelled.load(Ordering::Relaxed) {
+    fn estimate_seconds(&self, queue: &[QueueEntry]) -> Option<u64> {
+        if self.cancelled.load(Ordering::Relaxed) {
             return None;
         }
-        let seconds: f64 = self.recent.iter().map(Duration::as_secs_f64).sum();
-        Some((seconds * self.remaining as f64 / self.recent.len() as f64).ceil() as u64)
+        self.estimate.seconds(
+            queue[..self.queue_end]
+                .iter()
+                .filter(|entry| matches!(entry.status, Status::Pending | Status::Running))
+                .map(|entry| entry.size.get().copied().unwrap_or_default()),
+        )
     }
 }
 
@@ -110,6 +109,7 @@ struct Tenka {
     file_drops: FileDrops,
     catalog: Catalog,
     queue: Vec<QueueEntry>,
+    input_probes: Sender<Vec<InputProbe>>,
     file_column_fraction: f32,
     folder: Option<PathBuf>,
     format: OutputFormat,
@@ -161,6 +161,7 @@ impl Tenka {
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
             file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
+            input_probes: jobs::probe_inputs(),
             file_column_fraction: 0.5,
             folder: None,
             format: OutputFormat::default(),
@@ -293,7 +294,10 @@ impl Tenka {
                     self.add_files(files);
                 }
                 let pending = self.pending_count();
-                let estimate = self.worker.as_ref().and_then(Batch::estimate_seconds);
+                let estimate = self
+                    .worker
+                    .as_ref()
+                    .and_then(|worker| worker.estimate_seconds(&self.queue));
                 if pending > 0 || estimate.is_some() {
                     let left =
                         Rect::from_min_max(strip.min, egui::pos2(button.left(), strip.bottom()));
@@ -491,8 +495,8 @@ impl Tenka {
             .collect();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.worker = Some(Batch {
-            remaining: entries.len(),
-            recent: VecDeque::new(),
+            queue_end: self.queue.len(),
+            estimate: Estimate::default(),
             events: jobs::convert(
                 context,
                 entries,
@@ -725,23 +729,44 @@ impl Tenka {
     }
 
     fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        for path in paths {
-            if !self.queue.iter().any(|existing| existing.path == path) {
-                self.queue.push(QueueEntry {
-                    path,
-                    status: Status::Pending,
-                });
-            }
+        let paths: Vec<_> = paths.into_iter().collect();
+        if paths.is_empty() {
+            return;
         }
+        let mut known: HashSet<_> = self
+            .queue
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
+        let entries: Vec<_> = paths
+            .iter()
+            .filter(|path| known.insert(path.as_path()))
+            .map(|path| QueueEntry {
+                path: path.clone(),
+                size: Arc::new(OnceLock::new()),
+                status: Status::Pending,
+            })
+            .collect();
+        let probes = entries
+            .iter()
+            .map(|entry| InputProbe {
+                path: entry.path.clone(),
+                result: Arc::downgrade(&entry.size),
+            })
+            .collect();
+        self.queue.extend(entries);
+        let _ = self.input_probes.send(probes);
     }
 
     fn poll_worker(&mut self) {
         while let Some(worker) = &mut self.worker {
             match worker.events.try_recv() {
                 Ok(Event::Started(index)) => self.queue[index].status = Status::Running,
-                Ok(Event::Converted(index, result, elapsed)) => {
-                    self.queue[index].status = Status::Done(result);
-                    worker.record(elapsed);
+                Ok(Event::Converted(index, result)) => {
+                    self.queue[index].status = Status::Done(result.map(|completed| {
+                        worker.estimate.record(completed.timing);
+                        completed.output
+                    }));
                 }
                 Ok(Event::Interrupted(index)) => self.queue[index].status = Status::Pending,
                 Ok(Event::Finished) => self.worker = None,
@@ -965,30 +990,4 @@ fn file_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn estimate_uses_up_to_ten_completed_files_from_this_batch() {
-        let (_, events) = std::sync::mpsc::channel();
-        let mut batch = Batch {
-            events,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            remaining: 12,
-            recent: VecDeque::new(),
-        };
-        assert_eq!(batch.estimate_seconds(), None);
-        batch.record(Duration::from_secs(40));
-        assert_eq!(batch.estimate_seconds(), Some(440));
-
-        for _ in 0..10 {
-            batch.record(Duration::from_secs(2));
-        }
-        assert_eq!(batch.estimate_seconds(), Some(2));
-        batch.record(Duration::from_secs(2));
-        assert_eq!(batch.estimate_seconds(), None);
-    }
 }

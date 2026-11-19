@@ -49,7 +49,7 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 
 Tenka looks for results smaller than the source and caps the output at the full-resolution lossless size. If no smaller JPEG XL meets the mode's quality checks, it saves the smallest acceptable tested JPEG XL and marks any size increase next to the output size. WebP conversion skips files without a smaller result. Tenka compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 
-During conversion, the footer estimates the remaining time from the last ten completed files in the current batch.
+During conversion, the footer estimates the remaining time from up to ten completed files in the current batch. It scales reading time by input bytes and processing time by image pixel count. The queue reads file sizes and image headers in the background and uses the per-file average while either measurement is unavailable.
 
 </details>
 

@@ -1,31 +1,43 @@
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, BufReader, Read, Write},
     ops::ControlFlow::{self, Break, Continue},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, Sender},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
 use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source};
 
+use crate::estimate::{InputSize, Timing};
+
 pub enum Event {
     Started(usize),
-    Converted(usize, Result<Option<Conversion>, Failure>, Duration),
+    Converted(usize, Result<CompletedConversion, Failure>),
     Interrupted(usize),
     Finished,
+}
+
+pub struct CompletedConversion {
+    pub output: Option<Conversion>,
+    pub timing: Timing,
 }
 
 pub struct Conversion {
     pub path: PathBuf,
     pub source_bytes: usize,
     pub bytes: usize,
+}
+
+pub struct InputProbe {
+    pub path: PathBuf,
+    pub result: Weak<OnceLock<InputSize>>,
 }
 
 pub struct ComparisonPixels {
@@ -83,7 +95,6 @@ pub fn convert(
                 break;
             }
             emit(Event::Started(idx));
-            let start = Instant::now();
             let result =
                 match convert_one(&path, output_folder.as_deref(), options, mode, &cancelled) {
                     Ok(Continue(result)) => Ok(result),
@@ -93,9 +104,42 @@ pub fn convert(
                     }
                     Err(error) => Err(error),
                 };
-            emit(Event::Converted(idx, result, start.elapsed()));
+            emit(Event::Converted(idx, result));
         }
     })
+}
+
+pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
+    let (send, receive) = mpsc::channel::<Vec<InputProbe>>();
+    std::thread::spawn(move || {
+        for probes in receive {
+            for probe in probes {
+                if let Some(result) = probe.result.upgrade() {
+                    let _ = result.set(probe_input(&probe.path));
+                }
+            }
+        }
+    });
+    send
+}
+
+fn probe_input(path: &Path) -> InputSize {
+    let Some(metadata) = fs::metadata(path).ok().filter(fs::Metadata::is_file) else {
+        return InputSize::default();
+    };
+    let bytes = metadata.len();
+    let pixels = if bytes <= MAX_INPUT_BYTES {
+        File::open(path)
+            .ok()
+            .and_then(|file| Source::probe_dimensions(BufReader::new(file)))
+            .map(|(width, height)| u64::from(width) * u64::from(height))
+    } else {
+        None
+    };
+    InputSize {
+        bytes: Some(bytes.min(MAX_INPUT_BYTES + 1)),
+        pixels,
+    }
 }
 
 pub fn load_comparison(
@@ -173,8 +217,10 @@ fn convert_one(
     options: Options,
     mode: OptimizationMode,
     cancelled: &AtomicBool,
-) -> Result<ControlFlow<(), Option<Conversion>>, Failure> {
+) -> Result<ControlFlow<(), CompletedConversion>, Failure> {
+    let start = Instant::now();
     let input = read_image(path);
+    let read = start.elapsed();
     if cancelled.load(Ordering::Relaxed) {
         return Ok(Break(()));
     }
@@ -183,19 +229,29 @@ fn convert_one(
     if cancelled.load(Ordering::Relaxed) {
         return Ok(Break(()));
     }
-    let output = source?.optimize_for_conversion(options, bytes.len(), mode, cancelled);
+    let source = source?;
+    let (width, height) = source.dimensions();
+    let output = source.optimize_for_conversion(options, bytes.len(), mode, cancelled);
     if cancelled.load(Ordering::Relaxed) || matches!(output, Err(tenka_core::Error::Cancelled)) {
         return Ok(Break(()));
     }
-    let Some(output) = output? else {
-        return Ok(Continue(None));
+    let output = match output? {
+        Some(output) => Some(Conversion {
+            path: save_image(path, folder, output.setting.format(), &output.bytes)?,
+            source_bytes: bytes.len(),
+            bytes: output.bytes.len(),
+        }),
+        None => None,
     };
-    let path = save_image(path, folder, output.setting.format(), &output.bytes)?;
-    Ok(Continue(Some(Conversion {
-        path,
-        source_bytes: bytes.len(),
-        bytes: output.bytes.len(),
-    })))
+    Ok(Continue(CompletedConversion {
+        output,
+        timing: Timing {
+            bytes: bytes.len() as u64,
+            pixels: u64::from(width) * u64::from(height),
+            read,
+            processing: start.elapsed() - read,
+        },
+    }))
 }
 
 fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
