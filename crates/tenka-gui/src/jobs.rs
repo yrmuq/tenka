@@ -125,7 +125,13 @@ pub fn test_qualities(
         for quality in qualities {
             emit(Event::Tested(
                 quality,
-                test_one(&mut test, &file, folder.as_deref(), quality, (width, height)),
+                test_one(
+                    &mut test,
+                    &file,
+                    folder.as_deref(),
+                    quality,
+                    (width, height),
+                ),
             ));
         }
     })

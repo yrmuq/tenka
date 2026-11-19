@@ -90,7 +90,9 @@ impl<'a> QualityTest<'a> {
         let reference = self
             .reference
             .get_or_init(|| raster::QualityReference::new(self.original));
-        if side < original_side && let Entry::Vacant(entry) = self.probes.entry((side, None)) {
+        if side < original_side
+            && let Entry::Vacant(entry) = self.probes.entry((side, None))
+        {
             entry.insert(quality(&image, reference)?.map(|quality| Probe {
                 quality,
                 bytes: None,
@@ -246,9 +248,9 @@ fn measure(
         return Ok(None);
     }
     Ok(quality(&decoded, reference)?.map(|quality| Probe {
-            quality,
-            bytes: Some(bytes.len()),
-        }))
+        quality,
+        bytes: Some(bytes.len()),
+    }))
 }
 
 fn quality(image: &RgbaImage, reference: &raster::QualityReference<'_>) -> Result<Option<f64>> {
@@ -287,12 +289,10 @@ mod tests {
                     actual <= f64::from(target),
                     "{format:?} at {target}: {actual}"
                 );
-                assert!(
-                    test.probes.values().flatten().all(|probe| {
-                        probe.quality > f64::from(target)
-                            || displayed_tenths(probe.quality) <= displayed_tenths(actual)
-                    })
-                );
+                assert!(test.probes.values().flatten().all(|probe| {
+                    probe.quality > f64::from(target)
+                        || displayed_tenths(probe.quality) <= displayed_tenths(actual)
+                }));
             }
             let output = test.encode(100).unwrap();
             assert!(output.setting.is_lossless());
