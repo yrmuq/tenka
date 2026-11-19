@@ -636,12 +636,14 @@ mod tests {
 
     #[test]
     fn balance_trades_similarity_for_space_and_cheap_picks_the_smallest() {
-        let candidates = [(100.0, 1024), (92.0, 512), (80.0, 256), (81.0, 768)]
-            .map(|(quality, bytes)| Candidate {
-                setting: Setting::Jxl(1.0),
-                dimensions: (96, 64),
-                quality,
-                bytes,
+        let candidates =
+            [(100.0, 1024), (92.0, 512), (80.0, 256), (81.0, 768)].map(|(quality, bytes)| {
+                Candidate {
+                    setting: Setting::Jxl(1.0),
+                    dimensions: (96, 64),
+                    quality,
+                    bytes,
+                }
             });
         let balance = economical_candidate(&candidates, OptimizationMode::Balance).unwrap();
         let cheap = economical_candidate(&candidates, OptimizationMode::Cheap).unwrap();

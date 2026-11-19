@@ -10,7 +10,9 @@ use std::{
     time::Duration,
 };
 
-use eframe::egui::{self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui};
+use eframe::egui::{
+    self, Button, ComboBox, Context, Grid, RichText, ScrollArea, ThemePreference, Ui,
+};
 use jobs::{Conversion, Event, Failure};
 use language::{Catalog, LANGUAGES};
 use tenka_core::{OptimizationMode, Options, OutputFormat};
@@ -209,11 +211,7 @@ impl Tenka {
         ui.add_space(6.0);
         section(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                format_picker(
-                    ui,
-                    self.label(73),
-                    &mut self.conversion.format,
-                );
+                format_picker(ui, self.label(73), &mut self.conversion.format);
                 ui.horizontal(|ui| {
                     ui.label(self.label(110));
                     for (mode, label, hint) in [
