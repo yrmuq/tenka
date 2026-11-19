@@ -10,7 +10,7 @@ use eframe::egui::{
 };
 
 use crate::{
-    add_images_button, empty_drop_area,
+    ADD_IMAGES_SIZE, add_images_button, empty_drop_area,
     file_drop::FileDrops,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
@@ -19,7 +19,12 @@ use crate::{
     theme::SystemTheme,
 };
 
-pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Result {
+pub fn run(
+    icon: IconData,
+    language: &str,
+    theme: ThemePreference,
+    paths: Vec<PathBuf>,
+) -> eframe::Result {
     let catalog = Catalog::new(language);
     let title = format!("Tenka — {}", catalog.text(99));
     let options = eframe::NativeOptions {
@@ -36,7 +41,7 @@ pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Re
         options,
         Box::new(move |creation| {
             creation.egui_ctx.set_theme(theme);
-            Ok(Box::new(Comparison {
+            let mut comparison = Comparison {
                 catalog,
                 theme,
                 system_theme: SystemTheme::new(&creation.egui_ctx),
@@ -46,7 +51,9 @@ pub fn run(icon: IconData, language: &str, theme: ThemePreference) -> eframe::Re
                 loading: None,
                 camera: Camera::default(),
                 split: true,
-            }))
+            };
+            comparison.add(paths);
+            Ok(Box::new(comparison))
         }),
     )
 }
@@ -288,17 +295,28 @@ impl eframe::App for Comparison {
         self.system_theme.apply(context, self.theme);
         self.add(self.file_drops.take(context));
         egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(self.split, self.catalog.text(104))
+            let (controls, _) = ui.allocate_exact_size(
+                vec2(ui.available_width(), ADD_IMAGES_SIZE.y),
+                Sense::hover(),
+            );
+            let mode = Rect::from_center_size(controls.center(), vec2(76.0, ADD_IMAGES_SIZE.y));
+            if ui
+                .put(mode, egui::Button::new(self.catalog.text(110)))
+                .on_hover_text(self.catalog.text(if self.split { 104 } else { 123 }))
+                .clicked()
+            {
+                self.split = !self.split;
+            }
+            if !self.images.is_empty()
+                && ui
+                    .put(
+                        Rect::from_min_size(controls.min, ADD_IMAGES_SIZE),
+                        |ui: &mut Ui| add_images_button(ui, &self.catalog, true),
+                    )
                     .clicked()
-                {
-                    self.split = !self.split;
-                }
-                if !self.images.is_empty() && add_images_button(ui, &self.catalog, true) {
-                    self.pick_images();
-                }
-            });
+            {
+                self.pick_images();
+            }
         });
         self.load_images(context);
         self.show_captions(context);

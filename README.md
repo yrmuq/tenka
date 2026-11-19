@@ -31,16 +31,17 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 
 | Input | Action |
 | --- | --- |
-| Drop files or select **+** | Add source images to the conversion queue. |
+| Drop files or select **+** at the bottom | Add source images to the conversion queue. |
 | Format selector in the header | Choose JPEG XL or WebP. |
 | Mode selector in the header | **Best** prioritizes similarity. **Balance** weighs similarity and proportional size savings. **Cheap** picks the smallest result that passes the perceptual and local detail checks. |
 | Select **Output folder** | Choose where to save converted images. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
 | Select **Clear list** | Remove all entries from the conversion queue. |
 | Select the red cross on a row | Remove that entry from the conversion queue. |
+| Select the split circle on a completed row | Compare the original on the left with the converted image on the right. |
 | Drag the divider between **File** and **Output** | Resize both columns. |
 | Right-click a size in **Output** | Open the folder containing the converted image. |
-| Select **Compare** | Drop files into the comparison window or select **+**. **Split** is enabled by default and composes one view from corresponding regions of the images. Toggle it to show each image separately. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
+| Select **Compare** | Drop files into the comparison window or select **+**. Press **Mode** to switch between a shared split view and separate side-by-side images. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
 

@@ -6,6 +6,7 @@ mod language;
 mod theme;
 
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::mpsc::{Receiver, TryRecvError},
@@ -20,16 +21,22 @@ use jobs::{Conversion, Event, Failure};
 use language::Catalog;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
 
+const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
+
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!(
         "../../../packaging/io.github.yrmuq.tenka.png"
     ))
     .expect("the embedded Tenka icon is valid PNG");
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--compare") {
-        let language = args.next().unwrap_or_else(|| "system".into());
-        let theme = parse_theme(args.next().as_deref());
-        return comparison::run(icon, &language, theme);
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(OsStr::new("--compare")) {
+        let language = args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .unwrap_or_else(|| "system".into());
+        let theme = args.next();
+        let theme = parse_theme(theme.as_deref().and_then(OsStr::to_str));
+        return comparison::run(icon, &language, theme, args.map(PathBuf::from).collect());
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -137,7 +144,7 @@ impl Tenka {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
                     if ui.button(self.label(109)).clicked() {
-                        self.open_comparison();
+                        self.open_comparison(&[]);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let theme_label =
@@ -211,13 +218,60 @@ impl Tenka {
             .on_hover_text(self.label(110));
     }
 
-    fn show_convert(&mut self, ui: &mut Ui) {
-        let busy = self.worker.is_some();
-        let pending = self
-            .queue
+    fn pending_count(&self) -> usize {
+        self.queue
             .iter()
             .filter(|entry| matches!(entry.status, Status::Pending))
-            .count();
+            .count()
+    }
+
+    fn footer(&mut self, context: &Context) {
+        egui::TopBottomPanel::bottom("queue_footer")
+            .exact_height(ADD_IMAGES_SIZE.y)
+            .frame(
+                egui::Frame::side_top_panel(&context.style())
+                    .inner_margin(egui::Margin::symmetric(20, 0)),
+            )
+            .show(context, |ui| {
+                let (strip, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), ADD_IMAGES_SIZE.y),
+                    egui::Sense::hover(),
+                );
+                let busy = self.worker.is_some();
+                let button = Rect::from_center_size(strip.center(), ADD_IMAGES_SIZE);
+                if ui
+                    .put(button, |ui: &mut Ui| {
+                        add_images_button(ui, &self.catalog, !busy)
+                    })
+                    .clicked()
+                    && let Some(files) = self.picker().pick_files()
+                {
+                    self.add_files(files);
+                }
+                let pending = self.pending_count();
+                if pending > 0 {
+                    let left =
+                        Rect::from_min_max(strip.min, egui::pos2(button.left(), strip.bottom()));
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(left)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| ui.weak(format!("{}  {pending}", self.label(68))),
+                    );
+                }
+                if busy {
+                    let right = Rect::from_min_max(
+                        egui::pos2(strip.right() - ADD_IMAGES_SIZE.x, strip.top()),
+                        strip.max,
+                    );
+                    ui.put(right, egui::Spinner::new());
+                }
+            });
+    }
+
+    fn show_convert(&mut self, ui: &mut Ui) {
+        let busy = self.worker.is_some();
+        let pending = self.pending_count();
         let action_size = egui::vec2(140.0, 27.0);
         let (actions, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), action_size.y),
@@ -275,29 +329,18 @@ impl Tenka {
         {
             self.queue.clear();
         }
-        if self.folder.is_some() || busy || pending > 0 {
+        if self.folder.is_some() {
             let (details, _) =
                 ui.allocate_exact_size(egui::vec2(actions.width(), 20.0), egui::Sense::hover());
             let center =
                 egui::Rect::from_center_size(details.center(), egui::vec2(action_size.x, 20.0));
-            if self.folder.is_some()
-                && ui
-                    .put(center.translate(-offset), |ui: &mut Ui| {
-                        ui.add_enabled(!busy, Button::new(self.label(10)))
-                    })
-                    .clicked()
+            if ui
+                .put(center.translate(-offset), |ui: &mut Ui| {
+                    ui.add_enabled(!busy, Button::new(self.label(10)))
+                })
+                .clicked()
             {
                 self.folder = None;
-            }
-            if busy {
-                ui.put(center, egui::Spinner::new());
-            } else if pending > 0 {
-                ui.put(
-                    center,
-                    egui::Label::new(
-                        RichText::new(format!("{}  {pending}", self.label(68))).weak(),
-                    ),
-                );
             }
         }
         if let Some(error) = &self.folder_failure {
@@ -308,24 +351,11 @@ impl Tenka {
         }
         ui.separator();
 
-        let open_picker = if self.queue.is_empty() {
-            empty_drop_area(ui, &self.catalog, !busy)
-        } else {
-            ui.vertical_centered(|ui| add_images_button(ui, &self.catalog, !busy))
-                .inner
-        };
-        if open_picker && let Some(files) = self.picker().pick_files() {
-            let was_empty = self.queue.is_empty();
-            self.add_files(files);
-            if was_empty {
-                ui.ctx().request_repaint();
-                return;
-            }
-        }
         if self.queue.is_empty() {
-            return;
+            empty_drop_area(ui, &self.catalog, false);
+        } else {
+            self.show_queue(ui, busy);
         }
-        self.show_queue(ui, busy);
     }
 
     fn show_queue(&mut self, ui: &mut Ui, busy: bool) {
@@ -345,17 +375,19 @@ impl Tenka {
             (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
         let split = table.left() + file_width;
         let output_end_x = table.left() + output_end;
+        let remove_end = table.left() + table.width() * 0.95;
         let column_rects = |row: Rect| {
             [
                 Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
                 Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
-                Rect::from_x_y_ranges(output_end_x..=row.right(), row.y_range()),
+                Rect::from_x_y_ranges(output_end_x..=remove_end, row.y_range()),
+                Rect::from_x_y_ranges(remove_end..=table.right(), row.y_range()),
             ]
         };
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         let header = Rect::from_min_size(
             table.min,
-            egui::vec2(table.width(), HEADER_HEIGHT.min(table.height())),
+            egui::vec2(output_end, HEADER_HEIGHT.min(table.height())),
         );
         ui.painter()
             .rect_filled(header, 0, ui.visuals().faint_bg_color);
@@ -366,6 +398,7 @@ impl Tenka {
         }
         let body = Rect::from_min_max(header.left_bottom(), table.max);
         let mut remove = None;
+        let mut compare = None;
         let mut folder_failure = None;
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -385,7 +418,7 @@ impl Tenka {
                                 ui.painter()
                                     .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
-                            let [file, output, delete] = column_rects(row);
+                            let [file, output, delete, preview] = column_rects(row);
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
                                     ui.add(egui::Label::new(file_name(&entry.path)).truncate())
@@ -413,15 +446,32 @@ impl Tenka {
                             {
                                 remove = Some(index);
                             }
+                            let conversion = match &entry.status {
+                                Status::Done(Ok(Some(result))) => Some(result),
+                                _ => None,
+                            };
+                            let compare_rect =
+                                Rect::from_center_size(preview.center(), egui::vec2(28.0, 28.0));
+                            if ui
+                                .put(compare_rect, |ui: &mut Ui| {
+                                    icons::compare(ui, self.label(122), conversion.is_some())
+                                })
+                                .clicked()
+                                && let Some(conversion) = conversion
+                            {
+                                compare = Some([entry.path.clone(), conversion.path.clone()]);
+                            }
                             ui.painter().hline(row.x_range(), row.bottom(), stroke);
                         });
                     }
                 });
         });
         ui.painter()
-            .rect_stroke(table, 0, stroke, egui::StrokeKind::Inside);
-        ui.painter().hline(table.x_range(), header.bottom(), stroke);
-        ui.painter().vline(output_end_x, table.y_range(), stroke);
+            .rect_stroke(header, 0, stroke, egui::StrokeKind::Inside);
+        ui.painter()
+            .rect_stroke(body, 0, stroke, egui::StrokeKind::Inside);
+        ui.painter().vline(output_end_x, body.y_range(), stroke);
+        ui.painter().vline(remove_end, body.y_range(), stroke);
         let divider = ui
             .interact(
                 Rect::from_center_size(
@@ -448,6 +498,9 @@ impl Tenka {
         if let Some(index) = remove {
             self.queue.remove(index);
             ui.ctx().request_repaint();
+        }
+        if let Some(paths) = compare {
+            self.open_comparison(&paths);
         }
         if folder_failure.is_some() {
             self.folder_failure = folder_failure;
@@ -537,11 +590,12 @@ impl Tenka {
         }
     }
 
-    fn open_comparison(&mut self) {
+    fn open_comparison(&mut self, paths: &[PathBuf]) {
         self.comparison_failure = None;
         let child = std::env::current_exe().and_then(|executable| {
             Command::new(executable)
                 .args(["--compare", &self.language, theme_name(self.theme)])
+                .args(paths)
                 .spawn()
         });
         match child {
@@ -586,6 +640,7 @@ impl eframe::App for Tenka {
         self.poll_worker();
         self.add_files(self.file_drops.take(context));
         self.header(context);
+        self.footer(context);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(&context.style())
@@ -625,7 +680,7 @@ fn theme_id(theme: ThemePreference) -> u16 {
     }
 }
 
-fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
+fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, show_picker: bool) -> bool {
     let (area, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
     ui.painter().rect_stroke(
         area,
@@ -638,22 +693,26 @@ fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
             .max_rect(area)
             .layout(egui::Layout::top_down(egui::Align::Center)),
         |ui| {
-            ui.add_space(((area.height() - 54.0) * 0.5).max(0.0));
+            let mut content_height = ui.text_style_height(&egui::TextStyle::Body);
+            if show_picker {
+                content_height += ui.spacing().item_spacing.y + ADD_IMAGES_SIZE.y;
+            }
+            ui.add_space(((area.height() - content_height) * 0.5).max(0.0));
             ui.label(catalog.text(11));
-            add_images_button(ui, catalog, enabled)
+            show_picker && add_images_button(ui, catalog, true).clicked()
         },
     )
     .inner
 }
 
-fn add_images_button(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> bool {
+fn add_images_button(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> egui::Response {
     let response = ui.add_enabled(
         enabled,
-        Button::new(RichText::new("+").size(20.0)).min_size(egui::vec2(34.0, 30.0)),
+        Button::new(RichText::new("+").size(20.0)).min_size(ADD_IMAGES_SIZE),
     );
     let label = catalog.text(8);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
-    response.on_hover_text(label).clicked()
+    response.on_hover_text(label)
 }
 
 fn queue_cell(ui: &mut Ui, cell: Rect, contents: impl FnOnce(&mut Ui)) {

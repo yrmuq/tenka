@@ -67,6 +67,25 @@ pub(crate) fn theme(ui: &mut Ui, preference: ThemePreference, label: &str) -> Re
     response
 }
 
+pub(crate) fn compare(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    let response = ui
+        .add_enabled_ui(enabled, |ui| icon_button(ui, label))
+        .inner;
+    let mut color = ui.visuals().text_color();
+    if !enabled {
+        color = color.gamma_multiply(0.45);
+    }
+    let center = response.rect.center();
+    let radius = 7.5;
+    let stroke = Stroke::new(1.3_f32, color);
+    ui.painter().circle_stroke(center, radius, stroke);
+    ui.painter().line_segment(
+        [center - vec2(0.0, radius), center + vec2(0.0, radius)],
+        stroke,
+    );
+    response
+}
+
 fn icon_button(ui: &mut Ui, label: &str) -> Response {
     let response = ui.add(
         Button::new("")
