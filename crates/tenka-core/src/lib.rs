@@ -44,6 +44,8 @@ pub enum Error {
     QualityRange(u8),
     #[error("No tested encoding reached a similarity of {0}% or lower")]
     QualityCeiling(u8),
+    #[error("No tested encoding fit both the quality ceiling and the output size limit")]
+    TestSizeLimit,
     #[error("Image decoding failed")]
     Decode(#[source] image::ImageError),
     #[error("JPEG XL encoding failed")]
@@ -244,7 +246,43 @@ impl Source {
 
     /// Start a comparison series that reuses measurements for this source and format.
     pub fn quality_test(&self, options: Options) -> QualityTest<'_> {
-        QualityTest::new(&self.0, options)
+        QualityTest::new(&self.0, options, None)
+    }
+
+    /// Start a comparison series limited by the source and full-resolution lossless sizes.
+    pub fn quality_test_with_source_size(&self, options: Options, bytes: usize) -> QualityTest<'_> {
+        QualityTest::new(&self.0, options, Some(bytes))
+    }
+
+    /// Find the most similar tested output that reduces the original file size.
+    pub fn optimize(&self, options: Options, source_bytes: usize) -> Result<Option<Output>> {
+        let runner = parallel_runner();
+        let (lossless, _) = options.format.settings();
+        let baseline = lossless_output(&self.0, 100.0, lossless, &runner)?;
+        let max_bytes = output_budget(source_bytes, baseline.bytes.len());
+        if baseline.bytes.len() <= max_bytes {
+            return Ok(Some(baseline));
+        }
+
+        let mut best: Option<Output> = None;
+        self.visit_candidates(
+            options,
+            f64::from(DEFAULT_QUALITY),
+            max_bytes,
+            &runner,
+            |candidate| {
+                if best.as_ref().is_none_or(|current| {
+                    candidate
+                        .quality
+                        .total_cmp(&current.quality)
+                        .then_with(|| current.bytes.len().cmp(&candidate.bytes.len()))
+                        .is_gt()
+                }) {
+                    best = Some(candidate);
+                }
+            },
+        )?;
+        Ok(best)
     }
 
     /// Optimize for a minimum similarity score from 1 to 100.
@@ -254,21 +292,44 @@ impl Source {
             return Err(Error::QualityRange(min_quality));
         }
         let runner = parallel_runner();
-        let (lossless, lossy) = options.format.settings();
+        let (lossless, _) = options.format.settings();
+        let mut best = lossless_output(&self.0, 100.0, lossless, &runner)?;
         if min_quality == 100 {
-            return lossless_output(&self.0, 100.0, lossless, &runner);
+            return Ok(best);
         }
 
-        let min_quality = f64::from(min_quality);
+        self.visit_candidates(
+            options,
+            f64::from(min_quality),
+            usize::MAX,
+            &runner,
+            |candidate| {
+                if candidate.bytes.len() < best.bytes.len() {
+                    best = candidate;
+                }
+            },
+        )?;
+        Ok(best)
+    }
+
+    fn visit_candidates(
+        &self,
+        options: Options,
+        min_quality: f64,
+        max_bytes: usize,
+        runner: &Option<ThreadsRunner<'_>>,
+        mut visit: impl FnMut(Output),
+    ) -> Result<()> {
+        let (lossless, lossy) = options.format.settings();
         let reference = raster::QualityReference::new(&self.0);
-        let mut best = smallest_at(
+        probe_compression(
             &self.0,
             &reference,
             min_quality,
-            100.0,
-            lossless,
+            max_bytes,
             &lossy,
-            &runner,
+            runner,
+            &mut visit,
         )?;
 
         if options.auto_resize {
@@ -284,21 +345,22 @@ impl Source {
                     break;
                 };
                 previous_dimensions = image.dimensions();
-                let candidate = smallest_at(
+                let candidate = lossless_output(&image, quality, lossless, runner)?;
+                if candidate.bytes.len() <= max_bytes {
+                    visit(candidate);
+                }
+                probe_compression(
                     &image,
                     &reference,
                     min_quality,
-                    quality,
-                    lossless,
+                    max_bytes,
                     &lossy,
-                    &runner,
+                    runner,
+                    &mut visit,
                 )?;
-                if candidate.bytes.len() < best.bytes.len() {
-                    best = candidate;
-                }
             }
         }
-        Ok(best)
+        Ok(())
     }
 
     pub fn measure(&self, setting: Setting) -> Result<Measurement> {
@@ -345,39 +407,44 @@ fn lossless_output(
     })
 }
 
-fn smallest_at(
+fn output_budget(source_bytes: usize, lossless_bytes: usize) -> usize {
+    source_bytes.saturating_sub(1).min(lossless_bytes)
+}
+
+fn probe_compression(
     image: &RgbaImage,
     reference: &raster::QualityReference<'_>,
     min_quality: f64,
-    lossless_quality: f64,
-    lossless: Setting,
+    max_bytes: usize,
     lossy: &[Setting],
     runner: &Option<ThreadsRunner<'_>>,
-) -> Result<Output> {
-    let mut best = lossless_output(image, lossless_quality, lossless, runner)?;
-    let dimensions = best.dimensions;
+    visit: &mut impl FnMut(Output),
+) -> Result<()> {
+    let dimensions = image.dimensions();
     if dimensions.0.min(dimensions.1) < 8 {
-        return Ok(best);
+        return Ok(());
     }
 
     for &setting in lossy {
-        let (bytes, decoded) = round_trip(image, setting, runner)?;
+        let bytes = setting.encode(image, runner)?;
+        if bytes.len() > max_bytes {
+            continue;
+        }
+        let decoded = decode_candidate(&bytes, dimensions, setting, runner)?;
         if !raster::alpha_equal(image, &decoded) {
             break;
         }
         let Some(quality) = accepted_quality(reference.compare(&decoded)?, min_quality) else {
             break;
         };
-        if bytes.len() < best.bytes.len() {
-            best = Output {
-                bytes,
-                dimensions,
-                quality,
-                setting,
-            };
-        }
+        visit(Output {
+            bytes,
+            dimensions,
+            quality,
+            setting,
+        });
     }
-    Ok(best)
+    Ok(())
 }
 
 fn round_trip(
@@ -386,11 +453,21 @@ fn round_trip(
     runner: &Option<ThreadsRunner<'_>>,
 ) -> Result<(Vec<u8>, RgbaImage)> {
     let bytes = setting.encode(image, runner)?;
-    let decoded = setting.decode(&bytes, runner)?;
-    if decoded.dimensions() != image.dimensions() {
+    let decoded = decode_candidate(&bytes, image.dimensions(), setting, runner)?;
+    Ok((bytes, decoded))
+}
+
+fn decode_candidate(
+    bytes: &[u8],
+    dimensions: (u32, u32),
+    setting: Setting,
+    runner: &Option<ThreadsRunner<'_>>,
+) -> Result<RgbaImage> {
+    let decoded = setting.decode(bytes, runner)?;
+    if decoded.dimensions() != dimensions {
         return Err(Error::CandidateDimensions);
     }
-    Ok((bytes, decoded))
+    Ok(decoded)
 }
 
 fn parallel_runner() -> Option<ThreadsRunner<'static>> {
@@ -464,6 +541,31 @@ mod tests {
         Source(RgbaImage::from_fn(48, 32, |x, y| {
             image::Rgba([(x * 5) as u8, (y * 7) as u8, 40, (x * 3 + y) as u8])
         }))
+    }
+
+    #[test]
+    fn optimization_keeps_lossless_when_it_saves_space() {
+        let source = sample();
+        for format in OutputFormat::ALL {
+            let options = Options {
+                format,
+                auto_resize: true,
+            };
+            let baseline = source.convert_with_quality(options, 100).unwrap();
+            let input_bytes = baseline.bytes.len() + 1;
+            let optimized = source.optimize(options, input_bytes).unwrap().unwrap();
+            assert_eq!(optimized.quality, 100.0);
+            assert_eq!(optimized.dimensions, source.dimensions());
+            assert!(optimized.setting.is_lossless());
+            assert_eq!(optimized.bytes.len(), baseline.bytes.len());
+            assert!(source.optimize(options, 1).unwrap().is_none());
+            assert!(matches!(
+                source
+                    .quality_test_with_source_size(options, baseline.bytes.len())
+                    .encode(100),
+                Err(Error::TestSizeLimit)
+            ));
+        }
     }
 
     #[test]

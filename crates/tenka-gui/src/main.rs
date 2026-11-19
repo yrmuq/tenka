@@ -55,7 +55,7 @@ enum Tab {
 enum Status {
     Pending,
     Running,
-    Done(Result<Conversion, Failure>),
+    Done(Result<Option<Conversion>, Failure>),
 }
 
 struct QueueEntry {
@@ -332,7 +332,7 @@ impl Tenka {
                         ui.add(egui::Label::new(file_name(&entry.path)).truncate())
                             .on_hover_text(path_label(&entry.path));
                         match &entry.status {
-                            Status::Done(Ok(result)) => {
+                            Status::Done(Ok(Some(result))) => {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.weak(size(result.source_bytes));
@@ -388,7 +388,10 @@ impl Tenka {
                                         ui.label(self.label(25));
                                     }
                                     Status::Done(Err(error)) => self.show_error(ui, error),
-                                    Status::Done(Ok(_)) => unreachable!(),
+                                    Status::Done(Ok(None)) => {
+                                        ui.weak(self.label(107));
+                                    }
+                                    Status::Done(Ok(Some(_))) => unreachable!(),
                                 }
                             }
                         }

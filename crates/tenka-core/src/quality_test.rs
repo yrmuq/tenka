@@ -1,5 +1,6 @@
 use std::{
     cell::{LazyCell, OnceCell},
+    cmp::Reverse,
     collections::{HashMap, hash_map::Entry},
 };
 
@@ -8,7 +9,7 @@ use jpegxl_rs::ThreadsRunner;
 
 use crate::{
     Error, Options, Output, OutputFormat, RESIZE_SCALES, Result, Setting, lossless_output,
-    parallel_runner, raster, round_trip,
+    output_budget, parallel_runner, raster, round_trip,
 };
 
 /// Measures test encodings and reuses their scores within a comparison series.
@@ -18,6 +19,8 @@ pub struct QualityTest<'a> {
     runner: Option<ThreadsRunner<'static>>,
     reference: OnceCell<raster::QualityReference<'a>>,
     probes: HashMap<ProbeKey, Option<Probe>>,
+    source_bytes: Option<usize>,
+    lossless_bytes: Option<usize>,
 }
 
 type ProbeKey = (u32, Option<u8>);
@@ -29,13 +32,15 @@ struct Probe {
 }
 
 impl<'a> QualityTest<'a> {
-    pub(crate) fn new(original: &'a RgbaImage, options: Options) -> Self {
+    pub(crate) fn new(original: &'a RgbaImage, options: Options, source_bytes: Option<usize>) -> Self {
         Self {
             original,
             options,
             runner: parallel_runner(),
             reference: OnceCell::new(),
             probes: HashMap::new(),
+            source_bytes,
+            lossless_bytes: None,
         }
     }
 
@@ -49,12 +54,34 @@ impl<'a> QualityTest<'a> {
         let format = self.options.format;
         let (lossless, _) = format.settings();
         if ceiling == 100 {
-            return lossless_output(self.original, 100.0, lossless, &self.runner);
+            let output = lossless_output(self.original, 100.0, lossless, &self.runner)?;
+            self.lossless_bytes = Some(output.bytes.len());
+            if self
+                .source_bytes
+                .is_some_and(|source| output.bytes.len() >= source)
+            {
+                return Err(Error::TestSizeLimit);
+            }
+            return Ok(output);
         }
         if self.original.width().min(self.original.height()) < 8 {
             return Err(Error::QualityCeiling(ceiling));
         }
 
+        let max_bytes = match self.source_bytes {
+            Some(source) => {
+                let bytes = match self.lossless_bytes {
+                    Some(bytes) => bytes,
+                    None => {
+                        let bytes = lossless.encode(self.original, &self.runner)?.len();
+                        self.lossless_bytes = Some(bytes);
+                        bytes
+                    }
+                };
+                output_budget(source, bytes)
+            }
+            None => usize::MAX,
+        };
         let cap = f64::from(ceiling);
         let original_side = self.original.width().max(self.original.height());
         let mut sides = vec![original_side];
@@ -67,25 +94,25 @@ impl<'a> QualityTest<'a> {
             sides.dedup();
         }
         for &side in &sides {
-            self.probe_side(side, original_side, cap)?;
+            self.probe_side(side, original_side, cap, max_bytes)?;
         }
         for _ in 0..2 {
-            let intermediate = self.intermediate_sides(&sides, cap);
+            let intermediate = self.intermediate_sides(&sides, cap, max_bytes);
             if intermediate.is_empty() {
                 break;
             }
             for &side in &intermediate {
-                self.probe_side(side, original_side, cap)?;
+                self.probe_side(side, original_side, cap, max_bytes)?;
             }
             sides.extend(intermediate);
             sides.sort_unstable();
             sides.reverse();
         }
 
-        self.encode_best(ceiling, lossless)
+        self.encode_best(ceiling, lossless, max_bytes)
     }
 
-    fn probe_side(&mut self, side: u32, original_side: u32, cap: f64) -> Result<()> {
+    fn probe_side(&mut self, side: u32, original_side: u32, cap: f64, max_bytes: usize) -> Result<()> {
         let image = LazyCell::new(|| raster::limit_size(self.original, side));
         let reference = self
             .reference
@@ -107,11 +134,11 @@ impl<'a> QualityTest<'a> {
                     *entry.insert(result)
                 }
             };
-            Ok(result.is_some_and(|probe| probe.quality <= cap))
+            Ok(result.is_some_and(|probe| probe.fits(cap, max_bytes)))
         })
     }
 
-    fn intermediate_sides(&self, sides: &[u32], cap: f64) -> Vec<u32> {
+    fn intermediate_sides(&self, sides: &[u32], cap: f64, max_bytes: usize) -> Vec<u32> {
         if sides.len() < 2 {
             return Vec::new();
         }
@@ -120,7 +147,8 @@ impl<'a> QualityTest<'a> {
             .iter()
             .filter_map(|(&(side, _), probe)| {
                 let probe = probe.as_ref()?;
-                (probe.quality <= cap && sides.contains(&side)).then_some((side, probe.quality))
+                (probe.fits(cap, max_bytes) && sides.contains(&side))
+                    .then_some((side, probe.quality))
             })
             .max_by(|(a_side, a), (b_side, b)| a.total_cmp(b).then(a_side.cmp(b_side)))
             .map(|(side, _)| side);
@@ -149,21 +177,26 @@ impl<'a> QualityTest<'a> {
             .collect()
     }
 
-    fn encode_best(&mut self, ceiling: u8, lossless: Setting) -> Result<Output> {
+    fn encode_best(&mut self, ceiling: u8, lossless: Setting, max_bytes: usize) -> Result<Output> {
         let cap = f64::from(ceiling);
-        let score = self
+        let mut candidates: Vec<_> = self
             .probes
-            .values()
-            .flatten()
-            .filter(|probe| probe.quality <= cap)
-            .map(|probe| displayed_tenths(probe.quality))
-            .max()
-            .ok_or(Error::QualityCeiling(ceiling))?;
+            .iter_mut()
+            .filter_map(|(&key, probe)| {
+                let probe = probe.as_mut()?;
+                (probe.quality <= cap).then_some((key, probe))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Err(Error::QualityCeiling(ceiling));
+        }
+        candidates.sort_unstable_by_key(|(_, probe)| Reverse(displayed_tenths(probe.quality)));
         let mut best: Option<(ProbeKey, usize, f64)> = None;
-        for (&key, probe) in &mut self.probes {
-            let Some(probe) = probe else { continue };
-            if probe.quality > cap || displayed_tenths(probe.quality) != score {
-                continue;
+        for (key, probe) in candidates {
+            if best
+                .is_some_and(|(_, _, score)| displayed_tenths(probe.quality) < displayed_tenths(score))
+            {
+                break;
             }
             // Resize-only candidates need encoding only when their score competes for first place.
             let bytes = match probe.bytes {
@@ -175,25 +208,37 @@ impl<'a> QualityTest<'a> {
                     bytes
                 }
             };
-            if best.is_none_or(|(other_key, other_bytes, other_quality)| {
-                bytes
-                    .cmp(&other_bytes)
-                    .then_with(|| other_quality.total_cmp(&probe.quality))
-                    .then_with(|| other_key.cmp(&key))
-                    .is_lt()
-            }) {
+            if bytes <= max_bytes
+                && best.is_none_or(|(other_key, other_bytes, other_quality)| {
+                    bytes
+                        .cmp(&other_bytes)
+                        .then_with(|| other_quality.total_cmp(&probe.quality))
+                        .then_with(|| other_key.cmp(&key))
+                        .is_lt()
+                })
+            {
                 best = Some((key, bytes, probe.quality));
             }
         }
-        let ((side, strength), _, quality) = best.ok_or(Error::QualityCeiling(ceiling))?;
+        let ((side, strength), _, quality) = best.ok_or(Error::TestSizeLimit)?;
         let image = raster::limit_size(self.original, side);
         let setting = strength.map_or(lossless, |value| lossy_setting(self.options.format, value));
+        let bytes = setting.encode(&image, &self.runner)?;
+        if bytes.len() > max_bytes {
+            return Err(Error::TestSizeLimit);
+        }
         Ok(Output {
-            bytes: setting.encode(&image, &self.runner)?,
+            bytes,
             dimensions: image.dimensions(),
             quality,
             setting,
         })
+    }
+}
+
+impl Probe {
+    fn fits(self, cap: f64, max_bytes: usize) -> bool {
+        self.quality <= cap && self.bytes.is_none_or(|bytes| bytes <= max_bytes)
     }
 }
 
@@ -320,7 +365,8 @@ mod tests {
         let score = quality(&resized, &reference).unwrap().unwrap();
         let ceiling = score.ceil().max(1.0) as u8;
         assert!(ceiling < 100);
-        test.probe_side(side, width, f64::from(ceiling)).unwrap();
+        test.probe_side(side, width, f64::from(ceiling), usize::MAX)
+            .unwrap();
         assert_eq!(test.probes[&(side, None)].unwrap().quality, score);
         test.probes.retain(|key, _| *key == (side, None));
         let bytes = lossless.encode(&resized, &test.runner).unwrap().len();
@@ -331,10 +377,20 @@ mod tests {
                 bytes: Some(bytes + 1),
             }),
         );
-        let output = test.encode_best(ceiling, lossless).unwrap();
+        let output = test.encode_best(ceiling, lossless, usize::MAX).unwrap();
         assert_eq!(output.setting, lossless);
         assert_eq!(output.dimensions, (48, 32));
         assert_eq!(output.quality, score);
         assert_eq!(output.preview().unwrap(), *resized);
+        let higher_ceiling = ceiling + 1;
+        let probe = test.probes.get_mut(&(width, Some(12))).unwrap();
+        probe.as_mut().unwrap().quality = f64::from(higher_ceiling);
+        let bounded = test.encode_best(higher_ceiling, lossless, bytes).unwrap();
+        assert_eq!(bounded.quality, score);
+        assert_eq!(bounded.bytes, output.bytes);
+        assert!(matches!(
+            test.encode_best(higher_ceiling, lossless, bytes - 1),
+            Err(Error::TestSizeLimit)
+        ));
     }
 }

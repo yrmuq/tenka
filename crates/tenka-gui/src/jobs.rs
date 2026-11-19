@@ -12,7 +12,7 @@ use tenka_core::{MAX_INPUT_BYTES, Options, OutputFormat, QualityTest, Setting, S
 
 pub enum Event {
     Started(usize),
-    Converted(usize, Result<Conversion, Failure>),
+    Converted(usize, Result<Option<Conversion>, Failure>),
     Original(ColorImage, String),
     Tested(u8, Result<TestResult, Failure>),
     Failed(Failure),
@@ -72,6 +72,7 @@ impl From<tenka_core::Error> for Failure {
             CandidateDimensions => 81,
             QualityRange(_) => 86,
             QualityCeiling(_) => 105,
+            TestSizeLimit => 108,
         };
         Self {
             label,
@@ -105,9 +106,9 @@ pub fn test_qualities(
     qualities: Vec<u8>,
 ) -> Receiver<Event> {
     run(context, move |emit| {
-        let source = match read_image(&file)
-            .and_then(|bytes| Source::decode(&bytes).map_err(Failure::from))
-        {
+        let input =
+            read_image(&file).and_then(|bytes| Ok((Source::decode(&bytes)?, bytes.len())));
+        let (source, source_bytes) = match input {
             Ok(result) => result,
             Err(error) => {
                 emit(Event::Failed(error));
@@ -121,7 +122,7 @@ pub fn test_qualities(
             thumbnail.as_raw(),
         );
         emit(Event::Original(original, format!("{width} × {height}")));
-        let mut test = source.quality_test(options);
+        let mut test = source.quality_test_with_source_size(options, source_bytes);
         for quality in qualities {
             emit(Event::Tested(
                 quality,
@@ -243,19 +244,21 @@ fn convert_one(
     path: &Path,
     folder: Option<&Path>,
     options: Options,
-) -> Result<Conversion, Failure> {
+) -> Result<Option<Conversion>, Failure> {
     let bytes = read_image(path)?;
     let source = Source::decode(&bytes)?;
-    let output = source.convert(options)?;
+    let Some(output) = source.optimize(options, bytes.len())? else {
+        return Ok(None);
+    };
     let path = save_image(path, folder, output.setting.format(), None, &output.bytes)?;
-    Ok(Conversion {
+    Ok(Some(Conversion {
         path,
         source_bytes: bytes.len(),
         bytes: output.bytes.len(),
         dimensions: output.dimensions,
         quality: output.quality,
         lossless: output.setting.is_lossless() && output.dimensions == source.dimensions(),
-    })
+    }))
 }
 
 fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
