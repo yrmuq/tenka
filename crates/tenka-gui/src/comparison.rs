@@ -156,7 +156,7 @@ impl Comparison {
             let drop_area = area.shrink2(vec2(20.0, 15.0));
             if ui
                 .scope_builder(egui::UiBuilder::new().max_rect(drop_area), |ui| {
-                    empty_drop_area(ui, &self.catalog, true)
+                    empty_drop_area(ui, &self.catalog)
                 })
                 .inner
             {

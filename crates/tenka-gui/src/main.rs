@@ -328,6 +328,7 @@ impl Tenka {
             .clicked()
         {
             self.queue.clear();
+            ui.ctx().request_repaint();
         }
         if self.folder.is_some() {
             let (details, _) =
@@ -349,10 +350,13 @@ impl Tenka {
         if let Some(error) = &self.comparison_failure {
             self.show_error(ui, error);
         }
-        ui.separator();
-
         if self.queue.is_empty() {
-            empty_drop_area(ui, &self.catalog, false);
+            if empty_drop_area(ui, &self.catalog)
+                && let Some(files) = self.picker().pick_files()
+            {
+                self.add_files(files);
+                ui.ctx().request_repaint();
+            }
         } else {
             self.show_queue(ui, busy);
         }
@@ -375,13 +379,13 @@ impl Tenka {
             (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
         let split = table.left() + file_width;
         let output_end_x = table.left() + output_end;
-        let remove_end = table.left() + table.width() * 0.95;
+        let preview_end = table.left() + table.width() * 0.95;
         let column_rects = |row: Rect| {
             [
                 Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
                 Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
-                Rect::from_x_y_ranges(output_end_x..=remove_end, row.y_range()),
-                Rect::from_x_y_ranges(remove_end..=table.right(), row.y_range()),
+                Rect::from_x_y_ranges(output_end_x..=preview_end, row.y_range()),
+                Rect::from_x_y_ranges(preview_end..=table.right(), row.y_range()),
             ]
         };
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -418,7 +422,7 @@ impl Tenka {
                                 ui.painter()
                                     .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
-                            let [file, output, delete, preview] = column_rects(row);
+                            let [file, output, preview, delete] = column_rects(row);
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
                                     ui.add(egui::Label::new(file_name(&entry.path)).truncate())
@@ -436,16 +440,6 @@ impl Tenka {
                             queue_cell(ui, output, |ui| {
                                 self.show_output(ui, &entry.status, &mut folder_failure);
                             });
-                            let remove_rect =
-                                Rect::from_center_size(delete.center(), egui::vec2(28.0, 28.0));
-                            if ui
-                                .put(remove_rect, |ui: &mut Ui| {
-                                    remove_file_button(ui, self.label(121), !busy)
-                                })
-                                .clicked()
-                            {
-                                remove = Some(index);
-                            }
                             let conversion = match &entry.status {
                                 Status::Done(Ok(Some(result))) => Some(result),
                                 _ => None,
@@ -461,6 +455,16 @@ impl Tenka {
                             {
                                 compare = Some([entry.path.clone(), conversion.path.clone()]);
                             }
+                            let remove_rect =
+                                Rect::from_center_size(delete.center(), egui::vec2(28.0, 28.0));
+                            if ui
+                                .put(remove_rect, |ui: &mut Ui| {
+                                    remove_file_button(ui, self.label(121), !busy)
+                                })
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
                             ui.painter().hline(row.x_range(), row.bottom(), stroke);
                         });
                     }
@@ -471,7 +475,7 @@ impl Tenka {
         ui.painter()
             .rect_stroke(body, 0, stroke, egui::StrokeKind::Inside);
         ui.painter().vline(output_end_x, body.y_range(), stroke);
-        ui.painter().vline(remove_end, body.y_range(), stroke);
+        ui.painter().vline(preview_end, body.y_range(), stroke);
         let divider = ui
             .interact(
                 Rect::from_center_size(
@@ -640,7 +644,9 @@ impl eframe::App for Tenka {
         self.poll_worker();
         self.add_files(self.file_drops.take(context));
         self.header(context);
-        self.footer(context);
+        if !self.queue.is_empty() {
+            self.footer(context);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(&context.style())
@@ -680,7 +686,7 @@ fn theme_id(theme: ThemePreference) -> u16 {
     }
 }
 
-fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, show_picker: bool) -> bool {
+fn empty_drop_area(ui: &mut Ui, catalog: &Catalog) -> bool {
     let (area, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
     ui.painter().rect_stroke(
         area,
@@ -693,13 +699,12 @@ fn empty_drop_area(ui: &mut Ui, catalog: &Catalog, show_picker: bool) -> bool {
             .max_rect(area)
             .layout(egui::Layout::top_down(egui::Align::Center)),
         |ui| {
-            let mut content_height = ui.text_style_height(&egui::TextStyle::Body);
-            if show_picker {
-                content_height += ui.spacing().item_spacing.y + ADD_IMAGES_SIZE.y;
-            }
+            let content_height = ui.text_style_height(&egui::TextStyle::Body)
+                + ui.spacing().item_spacing.y
+                + ADD_IMAGES_SIZE.y;
             ui.add_space(((area.height() - content_height) * 0.5).max(0.0));
             ui.label(catalog.text(11));
-            show_picker && add_images_button(ui, catalog, true).clicked()
+            add_images_button(ui, catalog, true).clicked()
         },
     )
     .inner
