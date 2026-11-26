@@ -1,0 +1,111 @@
+name: Test and merge Dependabot PR
+run-name: "Dependabot #${{ inputs.number }} ${{ inputs.head }} ${{ inputs.base }}"
+on:
+  workflow_dispatch:
+    inputs:
+      number:
+        description: Dependabot pull request number
+        type: string
+        required: true
+      head:
+        description: Pull request head commit
+        type: string
+        required: true
+      base:
+        description: Exact deps commit to test against
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      merged_tree: ${{ steps.snapshot.outputs.commit }}
+    steps:
+      - name: Verify Dependabot request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ inputs.number }}
+          HEAD_SHA: ${{ inputs.head }}
+          BASE_SHA: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GH_REPO/pulls/$PR" | jq -e \
+            --arg repo "$GH_REPO" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" '
+              .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
+              .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
+              .head.sha == $head and .base.ref == "deps" and .base.sha == $base
+            '
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ inputs.number }}/merge
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the tested merge snapshot
+        id: snapshot
+        env:
+          HEAD_SHA: ${{ inputs.head }}
+          BASE_SHA: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          test "$(git show -s --format=%P HEAD)" = "$BASE_SHA $HEAD_SHA"
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+      - name: Build and smoke-test the merged code
+        uses: ./.github/actions/build
+        with:
+          channel: deps
+          cache: "false"
+
+  merge:
+    needs: check
+    if: github.ref == 'refs/heads/main' && needs.check.result == 'success'
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: tenka-publication
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ inputs.number }}
+      HEAD_SHA: ${{ inputs.head }}
+      BASE_SHA: ${{ inputs.base }}
+      TESTED_COMMIT: ${{ needs.check.outputs.merged_tree }}
+    steps:
+      - name: Merge the tested PR and remove its branch
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$TESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          details=$(gh api "repos/$GH_REPO/pulls/$PR")
+          if ! jq -e --arg repo "$GH_REPO" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg tested "$TESTED_COMMIT" '
+            .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
+            .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
+            .head.sha == $head and .base.ref == "deps" and .base.sha == $base and
+            .mergeable == true and .merge_commit_sha == $tested
+          ' <<< "$details" >/dev/null; then
+            echo "PR #$PR changed after testing or cannot be merged. Leaving it open."
+            gh workflow run dependabot-queue.yml --ref main
+            exit 0
+          fi
+          branch=$(jq -r .head.ref <<< "$details")
+          merge=$(gh api --method PUT "repos/$GH_REPO/pulls/$PR/merge" -f sha="$HEAD_SHA" -f merge_method=merge)
+          jq -e '.merged == true' <<< "$merge" >/dev/null
+          branch_sha=$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq .object.sha 2>/dev/null || true)
+          if [[ "$branch_sha" == "$HEAD_SHA" ]]; then
+            gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$branch"
+          fi
+          gh workflow run dependabot-queue.yml --ref main
+          gh workflow run deps.yml --ref deps

@@ -4,6 +4,9 @@ inputs:
   channel:
     description: AppImage channel (stable, dev, or deps)
     required: true
+  cache:
+    description: Enable the shared Cargo cache for trusted branch builds
+    default: "true"
 runs:
   using: composite
   steps:
@@ -17,6 +20,7 @@ runs:
         rustup default stable
         echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@v4
+      if: inputs.cache == 'true'
       with:
         path: |
           ~/.cargo/registry

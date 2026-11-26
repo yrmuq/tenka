@@ -12,7 +12,9 @@ updates:
       rust:
         patterns: ["*"]
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     target-branch: deps
     schedule:
       interval: cron

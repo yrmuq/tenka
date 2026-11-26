@@ -1,0 +1,47 @@
+name: Queue Dependabot checks
+on:
+  pull_request_target:
+    branches: [deps]
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [deps]
+  workflow_run:
+    workflows: [Stable release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: tenka-dependabot-queue
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    if: >-
+      (github.event_name != 'pull_request_target' ||
+       github.event.pull_request.user.login == 'dependabot[bot]') &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.conclusion == 'success'))
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Queue eligible PRs for the current deps commit
+        run: |
+          set -euo pipefail
+          base=$(gh api "repos/$GH_REPO/git/ref/heads/deps" --jq .object.sha)
+          runs=$(gh api --paginate "repos/$GH_REPO/actions/workflows/dependabot-checks.yml/runs?event=workflow_dispatch&branch=main&per_page=100" --jq '.workflow_runs[].display_title')
+          prs=$(gh api --paginate "repos/$GH_REPO/pulls?state=open&base=deps&per_page=100" --jq +            '.[] | select(.user.login == "dependabot[bot]" and .draft == false and .head.repo.full_name == .base.repo.full_name and (.head.ref | startswith("dependabot/"))) | [.number, .head.sha] | @tsv')
+          while IFS=$'\t' read -r number head; do
+            [[ -n "$number" ]] || continue
+            title="Dependabot #$number $head $base"
+            if grep -Fxq "$title" <<< "$runs"; then continue; fi
+            gh workflow run dependabot-checks.yml --ref main \
+              -f number="$number" -f head="$head" -f base="$base"
+          done <<< "$prs"
