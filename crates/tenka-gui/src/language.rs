@@ -28,6 +28,12 @@ impl Catalog {
         self.0.get(&id).copied().unwrap_or("")
     }
 
+    pub fn translate<'a>(&self, original: &'a str) -> &'a str {
+        entries(ENGLISH)
+            .find_map(|(id, text, _)| (text == original).then(|| self.text(id)))
+            .unwrap_or(original)
+    }
+
     pub(crate) fn file_size(&self, bytes: u64) -> String {
         if bytes < 1024 {
             return format!("{bytes} {}", self.text(117));

@@ -106,6 +106,17 @@ pub(crate) fn errors(ui: &mut Ui, label: &str) -> Response {
 
 pub(crate) fn info(ui: &mut Ui, label: &str) {
     let (rect, response) = ui.allocate_exact_size(INFO_SIZE, Sense::hover());
+    paint_info(ui, rect);
+    response.on_hover_text(label);
+}
+
+pub(crate) fn about(ui: &mut Ui, label: &str) -> Response {
+    let response = icon_button(ui, label);
+    paint_info(ui, response.rect);
+    response
+}
+
+fn paint_info(ui: &Ui, rect: Rect) {
     let center = rect.center();
     ui.painter()
         .circle_filled(center, 7.0, ui.visuals().text_color());
@@ -116,7 +127,6 @@ pub(crate) fn info(ui: &mut Ui, label: &str) {
         FontId::proportional(11.0),
         ui.visuals().panel_fill,
     );
-    response.on_hover_text(label);
 }
 
 pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {

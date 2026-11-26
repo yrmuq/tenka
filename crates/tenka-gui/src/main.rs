@@ -1,3 +1,4 @@
+mod about;
 mod comparison;
 mod estimate;
 mod file_drop;
@@ -6,6 +7,7 @@ mod jobs;
 mod language;
 mod summary;
 mod theme;
+mod updates;
 
 use std::{
     collections::HashSet,
@@ -33,12 +35,11 @@ use tenka_core::{OptimizationMode, Options, OutputFormat};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
 const MAIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 650.0);
+const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
 
 fn main() -> eframe::Result {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-        "../../../packaging/io.github.yrmuq.tenka.png"
-    ))
-    .expect("the embedded Tenka icon is valid PNG");
+    let icon =
+        eframe::icon_data::from_png_bytes(APP_ICON).expect("the embedded Tenka icon is valid PNG");
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() == Some(OsStr::new("--compare")) {
         let language = args
@@ -110,6 +111,7 @@ struct Tenka {
     system_theme: theme::SystemTheme,
     file_drops: FileDrops,
     catalog: Catalog,
+    about: about::About,
     queue: Vec<QueueEntry>,
     queue_jump: Option<usize>,
     scan_requests: Sender<Vec<PathBuf>>,
@@ -167,6 +169,7 @@ impl Tenka {
         let (scan_requests, scanned_inputs) = jobs::input_scanner(&context.egui_ctx);
         Self {
             catalog: Catalog::new(&language),
+            about: about::About::default(),
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
@@ -210,6 +213,9 @@ impl Tenka {
                         self.open_comparison(&[]);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::about(ui, self.label(153)).clicked() {
+                            self.about.open();
+                        }
                         let theme_label =
                             format!("{} · {}", self.label(4), self.label(theme_id(self.theme)));
                         if icons::theme(ui, self.theme, &theme_label).clicked() {
@@ -1133,6 +1139,7 @@ impl eframe::App for Tenka {
             )
             .show(context, |ui| self.show_convert(ui));
         self.show_completion(context);
+        self.about.show(context, &self.catalog);
         self.poll_comparison_windows(context);
     }
 
@@ -1261,6 +1268,52 @@ mod tests {
             let center = text.pos + text.galley.rect.center().to_vec2();
             (text.galley.text() == label && shape.clip_rect.contains(center)).then_some(center)
         })
+    }
+
+    #[test]
+    fn the_information_button_after_the_theme_opens_about() {
+        use eframe::App as _;
+
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.catalog = Catalog::new("en");
+        app.theme = ThemePreference::System;
+        let mut render = |events| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+            )
+        };
+        let main = render(Vec::new());
+        let info = main
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Circle(circle) if circle.radius == 7.0 => Some(circle.center),
+                _ => None,
+            })
+            .unwrap();
+        assert!(info.x > text_position(&main, "A").unwrap().x);
+        render(click(info));
+        let about = render(Vec::new());
+        for label in [
+            "About",
+            "Repository",
+            "GitHub",
+            "License",
+            env!("CARGO_PKG_VERSION"),
+            "Check for updates",
+            "Component",
+            "Upstream",
+            "Integration details",
+            "libjxl/libjxl",
+        ] {
+            assert!(text_position(&about, label).is_some(), "{label}");
+        }
     }
 
     #[test]

@@ -48,6 +48,7 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Select **Compare** | Drop files into the comparison window or select **+**. Press **Mode** to switch between a shared split view and separate side-by-side images. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
+| Select the information icon | Open About to see the installed version, project links, and components. **Check for updates** checks for a newer stable release on GitHub. |
 
 Tenka looks for results smaller than the source and caps the output at the full-resolution lossless size. If no smaller JPEG XL meets the mode's quality checks, it saves the smallest acceptable tested JPEG XL and marks any size increase next to the output size. WebP conversion skips files without a smaller result. Tenka compares each result with the original at the same scale. Automatic conversion also checks local pixel differences to catch loss of fine detail. For large images, Tenka estimates quality from a full-frame preview and several native-scale crops.
 
@@ -88,3 +89,4 @@ Tenka is distributed under the [GNU General Public License, version 3](LICENSE).
 | libjxl | [libjxl/libjxl](https://github.com/libjxl/libjxl) | `BSD-3-Clause` | JPEG XL codec. |
 | libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP encoder for conversion and comparison. |
 | SSIMULACRA2 | [rust-av/ssimulacra2](https://github.com/rust-av/ssimulacra2) | `BSD-2-Clause` | Perceptual quality metric. |
+| ureq | [algesten/ureq](https://github.com/algesten/ureq) | `MIT OR Apache-2.0` | HTTPS checks for updates. |
