@@ -29,7 +29,8 @@ jobs:
     outputs:
       merged_tree: ${{ steps.snapshot.outputs.commit }}
     steps:
-      - name: Verify Dependabot request
+      - name: Resolve the exact Dependabot merge snapshot
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -40,15 +41,31 @@ jobs:
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GH_REPO/git/ref/heads/deps" --jq .object.sha)" = "$BASE_SHA"
-          gh api "repos/$GH_REPO/pulls/$PR" | jq -e \
-            --arg repo "$GH_REPO" --arg head "$HEAD_SHA" '
-              .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
-              .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
-              .head.sha == $head and .base.ref == "deps"
-            '
+          for attempt in {1..12}; do
+            details=$(gh api "repos/$GH_REPO/pulls/$PR")
+            jq -e --arg repo "$GH_REPO" --arg head "$HEAD_SHA" '
+                .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
+                .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
+                .head.sha == $head and .base.ref == "deps"
+              ' <<< "$details" >/dev/null
+            if jq -e --arg base "$BASE_SHA" '.mergeable == false and .base.sha == $base' <<< "$details" >/dev/null; then
+              echo "PR #$PR conflicts with the current deps commit."
+              exit 1
+            fi
+            if commit=$(jq -er 'select(.mergeable == true) | .merge_commit_sha' <<< "$details") &&
+              [[ "$commit" =~ ^[0-9a-f]{40}$ ]] &&
+              parents=$(gh api "repos/$GH_REPO/git/commits/$commit" --jq '[.parents[].sha] | join(" ")') &&
+              [[ "$parents" == "$BASE_SHA $HEAD_SHA" ]]; then
+              printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "GitHub did not resolve a merge snapshot for PR #$PR at the requested commits."
+          exit 1
       - uses: actions/checkout@v5
         with:
-          ref: refs/pull/${{ inputs.number }}/merge
+          ref: ${{ steps.resolve.outputs.commit }}
           fetch-depth: 2
           persist-credentials: false
       - name: Verify the tested merge snapshot
