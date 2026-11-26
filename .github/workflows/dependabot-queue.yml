@@ -37,7 +37,11 @@ jobs:
           set -euo pipefail
           base=$(gh api "repos/$GH_REPO/git/ref/heads/deps" --jq .object.sha)
           runs=$(gh api --paginate "repos/$GH_REPO/actions/workflows/dependabot-checks.yml/runs?event=workflow_dispatch&branch=main&per_page=100" --jq '.workflow_runs[].display_title')
-          prs=$(gh api --paginate "repos/$GH_REPO/pulls?state=open&base=deps&per_page=100" --jq +            '.[] | select(.user.login == "dependabot[bot]" and .draft == false and .head.repo.full_name == .base.repo.full_name and (.head.ref | startswith("dependabot/"))) | [.number, .head.sha] | @tsv')
+          prs=$(gh api --paginate "repos/$GH_REPO/pulls?state=open&base=deps&per_page=100" | jq -r '
+            .[] | select(.user.login == "dependabot[bot]" and .draft == false and
+                         .head.repo.full_name == .base.repo.full_name and (.head.ref | startswith("dependabot/")))
+            | [.number, .head.sha] | @tsv
+          ')
           while IFS=$'\t' read -r number head; do
             [[ -n "$number" ]] || continue
             title="Dependabot #$number $head $base"
