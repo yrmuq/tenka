@@ -4,6 +4,7 @@ mod file_drop;
 mod icons;
 mod jobs;
 mod language;
+mod summary;
 mod theme;
 
 use std::{
@@ -27,6 +28,7 @@ use estimate::{Estimate, InputSize};
 use file_drop::FileDrops;
 use jobs::{Conversion, Event, Failure, InputProbe};
 use language::Catalog;
+use summary::Summary;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
@@ -118,6 +120,9 @@ struct Tenka {
     folder_failure: Option<Failure>,
     folder_request: Option<Receiver<Result<(), Failure>>>,
     worker: Option<Batch>,
+    batch_summary: Summary,
+    completed_summary: Option<Summary>,
+    open_batch_errors: bool,
     comparison_windows: Vec<Child>,
     comparison_failure: Option<Failure>,
 }
@@ -172,6 +177,9 @@ impl Tenka {
             folder_failure: None,
             folder_request: None,
             worker: None,
+            batch_summary: Summary::default(),
+            completed_summary: None,
+            open_batch_errors: false,
             comparison_windows: Vec::new(),
             comparison_failure: None,
         }
@@ -332,6 +340,7 @@ impl Tenka {
     }
 
     fn conversion_errors(&mut self, ui: &mut Ui, area: Rect) {
+        let open = std::mem::take(&mut self.open_batch_errors);
         let errors =
             self.queue
                 .iter()
@@ -357,8 +366,12 @@ impl Tenka {
                 },
             )
             .inner;
+        let id = ui.make_persistent_id("conversion_errors_popup");
+        if open {
+            egui::Popup::open_id(ui.ctx(), id);
+        }
         let jump = egui::Popup::from_toggle_button_response(&button)
-            .id(ui.make_persistent_id("conversion_errors_popup"))
+            .id(id)
             .align(egui::RectAlign::TOP_END)
             .gap(6.0)
             .frame(egui::Frame::popup(ui.style()).fill(ui.visuals().panel_fill))
@@ -496,6 +509,8 @@ impl Tenka {
         {
             self.queue.clear();
             self.queue_jump = None;
+            self.batch_summary = Summary::default();
+            self.completed_summary = None;
             self.folder = None;
             self.folder_failure = None;
             self.folder_request = None;
@@ -516,6 +531,80 @@ impl Tenka {
             }
         } else {
             self.show_queue(ui, busy);
+        }
+    }
+
+    fn show_completion(&mut self, context: &Context) {
+        let Some(summary) = &self.completed_summary else {
+            return;
+        };
+        let response = egui::Modal::new(egui::Id::new("conversion_summary")).show(context, |ui| {
+            ui.set_min_width(360.0);
+            ui.heading(self.label(135));
+            ui.add_space(6.0);
+            egui::Grid::new("summary_totals").show(ui, |ui| {
+                ui.label(self.label(136));
+                ui.label(format!("{} → {}", summary.attempted(), summary.converted));
+                ui.end_row();
+                ui.label(self.label(137));
+                ui.label(format!(
+                    "{} → {}",
+                    self.catalog.file_size(summary.source_bytes),
+                    self.catalog.file_size(summary.output_bytes),
+                ));
+                ui.end_row();
+                if summary.source_bytes > 0 {
+                    let savings = summary.source_bytes.abs_diff(summary.output_bytes);
+                    let percent = (savings as f64 / summary.source_bytes as f64 * 100.0).round();
+                    let label = if summary.output_bytes > summary.source_bytes {
+                        139
+                    } else {
+                        138
+                    };
+                    ui.label(self.label(label));
+                    ui.strong(format!(
+                        "{} ({percent:.0}%)",
+                        self.catalog.file_size(savings)
+                    ));
+                    ui.end_row();
+                }
+                ui.label(self.label(140));
+                ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
+                ui.end_row();
+            });
+            let mut open_errors = false;
+            if summary.errors > 0 || summary.skipped > 0 {
+                ui.horizontal(|ui| {
+                    if summary.errors > 0 {
+                        let label = format!("{} · {}", self.label(124), summary.errors);
+                        open_errors = ui.button(label).clicked();
+                    }
+                    if summary.skipped > 0 {
+                        ui.weak(format!("{} · {}", self.label(141), summary.skipped));
+                    }
+                });
+            }
+            ui.separator();
+            let mut open_folder = false;
+            ui.horizontal(|ui| {
+                if ui.button(self.label(142)).clicked() {
+                    ui.close();
+                }
+                if summary.folder().is_some() {
+                    open_folder = ui.button(self.label(143)).clicked();
+                }
+            });
+            (open_errors, open_folder)
+        });
+        let (open_errors, open_folder) = response.inner;
+        if open_folder && let Some(folder) = summary.folder() {
+            self.folder_failure = None;
+            self.folder_request = Some(jobs::open_folder(context, folder.to_owned()));
+        }
+        if open_errors || open_folder || response.should_close() {
+            self.completed_summary = None;
+            self.open_batch_errors = open_errors;
+            context.request_repaint();
         }
     }
 
@@ -769,8 +858,8 @@ impl Tenka {
                     ui.add(
                         egui::Label::new(format!(
                             "{} -> {}",
-                            self.catalog.file_size(result.source_bytes),
-                            self.catalog.file_size(result.bytes),
+                            self.catalog.file_size(result.source_bytes as u64),
+                            self.catalog.file_size(result.bytes as u64),
                         ))
                         .truncate()
                         .sense(egui::Sense::click()),
@@ -835,13 +924,21 @@ impl Tenka {
             match worker.events.try_recv() {
                 Ok(Event::Started(index)) => self.queue[index].status = Status::Running,
                 Ok(Event::Converted(index, result)) => {
-                    self.queue[index].status = Status::Done(result.map(|completed| {
+                    let result = result.map(|completed| {
                         worker.estimate.record(completed.timing);
                         completed.output
-                    }));
+                    });
+                    self.batch_summary.record(&result);
+                    self.queue[index].status = Status::Done(result);
                 }
                 Ok(Event::Interrupted(index)) => self.queue[index].status = Status::Pending,
-                Ok(Event::Finished) => self.worker = None,
+                Ok(Event::Finished(elapsed)) => {
+                    self.batch_summary.elapsed += elapsed;
+                    self.worker = None;
+                    if self.pending_count() == 0 && self.batch_summary.attempted() > 0 {
+                        self.completed_summary = Some(std::mem::take(&mut self.batch_summary));
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     let mut conversion = false;
@@ -946,6 +1043,7 @@ impl eframe::App for Tenka {
             context.send_viewport_cmd(command);
         }
         self.system_theme.apply(context, self.theme);
+        self.add_files(self.file_drops.take(context));
         self.poll_worker();
         if let Some(result) = self
             .folder_request
@@ -955,7 +1053,6 @@ impl eframe::App for Tenka {
             self.folder_failure = result.err();
             self.folder_request = None;
         }
-        self.add_files(self.file_drops.take(context));
         self.header(context);
         if !self.queue.is_empty() {
             self.footer(context);
@@ -966,6 +1063,7 @@ impl eframe::App for Tenka {
                     .inner_margin(egui::Margin::symmetric(20, 15)),
             )
             .show(context, |ui| self.show_convert(ui));
+        self.show_completion(context);
         self.poll_comparison_windows(context);
     }
 
@@ -1075,11 +1173,30 @@ fn file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Event as InputEvent, FullOutput, Modifiers, PointerButton, Pos2, RawInput, Shape};
+
+    fn click(pos: Pos2) -> Vec<InputEvent> {
+        let button = |pressed| InputEvent::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        vec![InputEvent::PointerMoved(pos), button(true), button(false)]
+    }
+
+    fn text_position(output: &FullOutput, label: &str) -> Option<Pos2> {
+        output.shapes.iter().find_map(|shape| {
+            let Shape::Text(text) = &shape.shape else {
+                return None;
+            };
+            let center = text.pos + text.galley.rect.center().to_vec2();
+            (text.galley.text() == label && shape.clip_rect.contains(center)).then_some(center)
+        })
+    }
 
     #[test]
     fn clicking_an_error_scrolls_to_its_row_in_the_queue() {
-        use egui::{Event, FullOutput, Modifiers, PointerButton, Pos2, RawInput, Shape};
-
         let ctx = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         app.catalog = Catalog::new("en");
@@ -1110,25 +1227,6 @@ mod tests {
                 },
             )
         };
-        let click = |pos| {
-            let button = |pressed| Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed,
-                modifiers: Modifiers::NONE,
-            };
-            vec![Event::PointerMoved(pos), button(true), button(false)]
-        };
-        let text_position = |output: &FullOutput, label: &str| {
-            output.shapes.iter().find_map(|shape| {
-                let Shape::Text(text) = &shape.shape else {
-                    return None;
-                };
-                let center = text.pos + text.galley.rect.center().to_vec2();
-                (text.galley.text() == label && shape.clip_rect.contains(center)).then_some(center)
-            })
-        };
-
         let initial = render(Vec::new());
         assert!(text_position(&initial, "image-31.jpg").is_none());
         let toggle = initial
@@ -1146,5 +1244,116 @@ mod tests {
         let queue = render(Vec::new());
         assert!(text_position(&queue, "Conversion errors").is_none());
         assert!(text_position(&queue, "image-31.jpg").is_some());
+    }
+
+    #[test]
+    fn completion_after_resume_counts_only_this_batch_and_reuses_the_error_panel() {
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.catalog = Catalog::new("en");
+        app.add_files(["old.jpg", "saved.jpg", "skipped.jpg", "failed.jpg"].map(PathBuf::from));
+        let output = || Conversion {
+            path: PathBuf::from("/results/saved.jxl"),
+            source_bytes: 2048,
+            bytes: 1024,
+        };
+        app.queue[0].status = Status::Done(Ok(Some(output())));
+        let timing = estimate::Timing {
+            bytes: 2048,
+            pixels: 16,
+            read: Duration::ZERO,
+            processing: Duration::ZERO,
+        };
+        let send_batch = |app: &mut Tenka, events, cancelled| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let events: Vec<Event> = events;
+            for event in events {
+                send.send(event).unwrap();
+            }
+            app.worker = Some(Batch {
+                events: receive,
+                cancelled: Arc::new(AtomicBool::new(cancelled)),
+                queue_end: app.queue.len(),
+                estimate: Estimate::default(),
+            });
+            app.poll_worker();
+        };
+
+        send_batch(
+            &mut app,
+            vec![
+                Event::Converted(
+                    1,
+                    Ok(jobs::CompletedConversion {
+                        output: Some(output()),
+                        timing,
+                    }),
+                ),
+                Event::Started(2),
+                Event::Interrupted(2),
+                Event::Finished(Duration::from_secs(60)),
+            ],
+            true,
+        );
+        assert!(app.completed_summary.is_none());
+        send_batch(
+            &mut app,
+            vec![
+                Event::Converted(
+                    2,
+                    Ok(jobs::CompletedConversion {
+                        output: None,
+                        timing,
+                    }),
+                ),
+                Event::Converted(
+                    3,
+                    Err(Failure {
+                        label: 51,
+                        detail: String::new(),
+                    }),
+                ),
+                Event::Finished(Duration::from_secs(5)),
+            ],
+            false,
+        );
+        let summary = app.completed_summary.as_ref().unwrap();
+        assert_eq!(summary.attempted(), 3);
+        assert_eq!(summary.converted, 1);
+        assert_eq!(summary.folder(), Some(Path::new("/results")));
+
+        let mut render = |events| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.footer(ctx);
+                    app.show_completion(ctx);
+                },
+            )
+        };
+        render(Vec::new());
+        let modal = render(Vec::new());
+        for label in [
+            "Conversion complete",
+            "3 → 1",
+            "2.0 KB → 1.0 KB",
+            "1.0 KB (50%)",
+            "1 min 5 s",
+            "Skipped · 1",
+            "Open folder",
+        ] {
+            assert!(text_position(&modal, label).is_some(), "{label}");
+        }
+        render(click(
+            text_position(&modal, "Conversion errors · 1").unwrap(),
+        ));
+        render(Vec::new());
+        let popup = render(Vec::new());
+        assert!(text_position(&popup, "Conversion complete").is_none());
+        assert!(text_position(&popup, "[E51] Image exceeds input limits").is_some());
     }
 }

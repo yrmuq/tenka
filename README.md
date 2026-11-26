@@ -38,6 +38,7 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 | Select **Output** | Choose where to save converted images. The button displays the selected folder name. |
 | Select **Convert** | Save results in the chosen format and mode beside the originals or in the chosen folder. Existing files are kept. |
 | Select **Cancel** during conversion | Stop the batch. Select **Convert** to continue with the pending files. |
+| Finish a conversion queue | See file counts, size savings, and time spent converting. Open the error panel or the common destination folder when available. |
 | Select **Clear** | Remove all entries from the conversion queue and reset the output folder. |
 | Select the red **!** in the footer | View conversion errors. Select an error to jump to its queue row, or select the share icon to copy all errors. |
 | Select the red cross on a row | Remove that entry from the conversion queue. |

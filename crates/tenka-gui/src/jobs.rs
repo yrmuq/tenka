@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
@@ -21,7 +21,7 @@ pub enum Event {
     Started(usize),
     Converted(usize, Result<CompletedConversion, Failure>),
     Interrupted(usize),
-    Finished,
+    Finished(Duration),
 }
 
 pub struct CompletedConversion {
@@ -125,11 +125,24 @@ pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
 }
 
 pub fn reveal_file(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
+    file_manager_request(context, path, "ShowItems", 133)
+}
+
+pub fn open_folder(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
+    file_manager_request(context, path, "ShowFolders", 71)
+}
+
+fn file_manager_request(
+    context: &Context,
+    path: PathBuf,
+    method: &'static str,
+    label: u16,
+) -> Receiver<Result<(), Failure>> {
     let context = context.clone();
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = show_file_in_manager(&path).map_err(|detail| Failure {
-            label: 133,
+        let result = show_in_file_manager(&path, method).map_err(|detail| Failure {
+            label,
             detail: format!("{}\n{detail}", path.display()),
         });
         if send.send(result).is_ok() {
@@ -140,7 +153,7 @@ pub fn reveal_file(context: &Context, path: PathBuf) -> Receiver<Result<(), Fail
 }
 
 #[cfg(target_os = "linux")]
-fn show_file_in_manager(path: &Path) -> Result<(), String> {
+fn show_in_file_manager(path: &Path, method: &str) -> Result<(), String> {
     use zbus::blocking::{Connection, Proxy};
 
     let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
@@ -154,12 +167,12 @@ fn show_file_in_manager(path: &Path) -> Result<(), String> {
         "/org/freedesktop/FileManager1",
         "org.freedesktop.FileManager1",
     )
-    .and_then(|proxy| proxy.call("ShowItems", &(uris.as_slice(), "")))
+    .and_then(|proxy| proxy.call(method, &(uris.as_slice(), "")))
     .map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn show_file_in_manager(_: &Path) -> Result<(), String> {
+fn show_in_file_manager(_: &Path, _: &str) -> Result<(), String> {
     Err("Showing files in the desktop file manager is supported on Linux".into())
 }
 
@@ -240,13 +253,14 @@ fn run(context: &Context, work: impl FnOnce(&dyn Fn(Event)) + Send + 'static) ->
     let context = context.clone();
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
+        let start = Instant::now();
         let emit = |event| {
             if send.send(event).is_ok() {
                 context.request_repaint();
             }
         };
         work(&emit);
-        emit(Event::Finished);
+        emit(Event::Finished(start.elapsed()));
     });
     receive
 }

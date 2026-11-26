@@ -28,7 +28,7 @@ impl Catalog {
         self.0.get(&id).copied().unwrap_or("")
     }
 
-    pub(crate) fn file_size(&self, bytes: usize) -> String {
+    pub(crate) fn file_size(&self, bytes: u64) -> String {
         if bytes < 1024 {
             return format!("{bytes} {}", self.text(117));
         }
@@ -57,6 +57,18 @@ impl Catalog {
             return format!("{hours} {}", self.text(128));
         }
         format!("{hours} {} {minutes} {}", self.text(128), self.text(127))
+    }
+
+    pub(crate) fn elapsed(&self, seconds: u64) -> String {
+        let hours = seconds / 3600;
+        let minutes = seconds / 60 % 60;
+        let seconds = seconds % 60;
+        [(hours, 128), (minutes, 127), (seconds, 126)]
+            .into_iter()
+            .filter(|&(value, unit)| value > 0 || unit == 126 && hours == 0 && minutes == 0)
+            .map(|(value, unit)| format!("{value} {}", self.text(unit)))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 

@@ -6,6 +6,7 @@
 - `crates/tenka-gui/src/main.rs` implements the conversion window and routes batch work through a background worker.
 - `crates/tenka-gui/src/jobs.rs` bridges the desktop interface to the library, probes queued file sizes and dimensions, reveals files in the desktop file manager, and handles file I/O.
 - `crates/tenka-gui/src/estimate.rs` estimates remaining batch time from input byte sizes, pixel counts, and recent conversion timings.
+- `crates/tenka-gui/src/summary.rs` accumulates conversion counts, saved output sizes, and active time across pause and resume.
 - `crates/tenka-gui/src/comparison.rs` runs the comparison window and synchronizes zoom and pan between full-resolution images.
 - `crates/tenka-gui/src/language.rs` loads the English and Russian catalogs from `languages/`.
 - `crates/tenka-gui/src/theme.rs` follows system appearance through the Linux settings portal for both windows.
