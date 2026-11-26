@@ -136,6 +136,27 @@ pub(crate) fn share(ui: &mut Ui, label: &str) -> Response {
     response
 }
 
+pub(crate) fn close(ui: &mut Ui, label: &str) -> Response {
+    let response = icon_button(ui, label);
+    let center = response.rect.center();
+    let stroke = Stroke::new(1.3_f32, ui.style().interact(&response).text_color());
+    for offset in [vec2(4.5, 4.5), vec2(4.5, -4.5)] {
+        ui.painter()
+            .line_segment([center - offset, center + offset], stroke);
+    }
+    response
+}
+
+pub(crate) fn right_arrow(ui: &mut Ui) {
+    let height = ui.text_style_height(&eframe::egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(vec2(12.0, height), Sense::hover());
+    ui.painter().arrow(
+        rect.center() - vec2(5.0, 0.0),
+        vec2(10.0, 0.0),
+        Stroke::new(1.2_f32, ui.visuals().text_color()),
+    );
+}
+
 pub(crate) fn reveal_file(ui: &mut Ui, label: &str) -> Response {
     let response = icon_button(ui, label);
     let center = response.rect.center();

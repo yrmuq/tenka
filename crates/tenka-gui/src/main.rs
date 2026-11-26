@@ -539,19 +539,30 @@ impl Tenka {
             return;
         };
         let response = egui::Modal::new(egui::Id::new("conversion_summary")).show(context, |ui| {
-            ui.set_min_width(360.0);
-            ui.heading(self.label(135));
+            ui.set_width(360.0);
+            ui.horizontal(|ui| {
+                ui.heading(self.label(135));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::close(ui, self.label(142)).clicked() {
+                        ui.close_kind(egui::UiKind::Modal);
+                    }
+                });
+            });
             ui.add_space(6.0);
             egui::Grid::new("summary_totals").show(ui, |ui| {
                 ui.label(self.label(136));
-                ui.label(format!("{} → {}", summary.attempted(), summary.converted));
+                ui.horizontal(|ui| {
+                    ui.label(summary.attempted().to_string());
+                    icons::right_arrow(ui);
+                    ui.label(summary.converted.to_string());
+                });
                 ui.end_row();
                 ui.label(self.label(137));
-                ui.label(format!(
-                    "{} → {}",
-                    self.catalog.file_size(summary.source_bytes),
-                    self.catalog.file_size(summary.output_bytes),
-                ));
+                ui.horizontal(|ui| {
+                    ui.label(self.catalog.file_size(summary.source_bytes));
+                    icons::right_arrow(ui);
+                    ui.label(self.catalog.file_size(summary.output_bytes));
+                });
                 ui.end_row();
                 if summary.source_bytes > 0 {
                     let savings = summary.source_bytes.abs_diff(summary.output_bytes);
@@ -584,15 +595,11 @@ impl Tenka {
                     }
                 });
             }
-            ui.separator();
-            let mut open_folder = false;
-            ui.horizontal(|ui| {
-                if ui.button(self.label(142)).clicked() {
-                    ui.close();
-                }
-                if summary.folder().is_some() {
-                    open_folder = ui.button(self.label(143)).clicked();
-                }
+            let open_folder = summary.folder().is_some_and(|_| {
+                ui.separator();
+                ui.vertical_centered(|ui| ui.button(self.label(143)))
+                    .inner
+                    .clicked()
             });
             (open_errors, open_folder)
         });
@@ -1339,15 +1346,28 @@ mod tests {
         let modal = render(Vec::new());
         for label in [
             "Conversion complete",
-            "3 → 1",
-            "2.0 KB → 1.0 KB",
+            "Sizes",
+            "3",
+            "1",
+            "2.0 KB",
+            "1.0 KB",
             "1.0 KB (50%)",
             "1 min 5 s",
             "Skipped · 1",
-            "Open folder",
         ] {
             assert!(text_position(&modal, label).is_some(), "{label}");
         }
+        let folder_button = text_position(&modal, "Open folder").unwrap();
+        assert!((folder_button.x - MAIN_WINDOW_SIZE.x / 2.0).abs() < 2.0);
+        let arrow_shafts = modal
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
+                    if a.y == b.y && (b.x - a.x - 10.0).abs() < 0.1)
+            })
+            .count();
+        assert_eq!(arrow_shafts, 2);
         render(click(
             text_position(&modal, "Conversion errors · 1").unwrap(),
         ));
@@ -1355,5 +1375,44 @@ mod tests {
         let popup = render(Vec::new());
         assert!(text_position(&popup, "Conversion complete").is_none());
         assert!(text_position(&popup, "[E51] Image exceeds input limits").is_some());
+    }
+
+    #[test]
+    fn completion_cross_in_the_top_right_dismisses_the_dialog() {
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.catalog = Catalog::new("en");
+        app.completed_summary = Some(Summary::default());
+        let mut render = |events| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.show_completion(ctx),
+            )
+        };
+
+        render(Vec::new());
+        let modal = render(Vec::new());
+        let heading = text_position(&modal, "Conversion complete").unwrap();
+        let cross = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match shape.shape {
+                Shape::LineSegment { points: [a, b], .. }
+                    if b.x - a.x == 9.0 && b.y - a.y == 9.0 =>
+                {
+                    Some(a.lerp(b, 0.5))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(cross.x > heading.x && cross.x > MAIN_WINDOW_SIZE.x / 2.0 + 150.0);
+        assert!((cross.y - heading.y).abs() < 3.0);
+        assert!(text_position(&modal, "Done").is_none());
+        render(click(cross));
+        assert!(app.completed_summary.is_none());
     }
 }
