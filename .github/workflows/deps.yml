@@ -1,0 +1,36 @@
+name: Dependency prerelease
+on:
+  push:
+    branches: [deps]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tenka-publication
+  cancel-in-progress: false
+
+jobs:
+  prerelease:
+    if: github.ref == 'refs/heads/deps'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Prepare version
+        id: prepare
+        run: bash packaging/release.sh prepare deps
+      - uses: ./.github/actions/build
+        if: steps.prepare.outputs.version != ''
+        with:
+          channel: deps
+      - name: Publish and verify dependency AppImage
+        if: steps.prepare.outputs.version != ''
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: bash packaging/release.sh publish deps "$VERSION"

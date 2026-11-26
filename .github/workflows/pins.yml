@@ -1,0 +1,32 @@
+name: Update AppImage packaging pins
+on:
+  schedule:
+    - cron: "0 9 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: tenka-appimage-pins
+  cancel-in-progress: false
+
+jobs:
+  pins:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: deps
+      - name: Update verified packaging downloads
+        run: |
+          python3 packaging/update-appimage-pins.py
+          if git diff --quiet -- packaging/appimage-pins.env; then exit 0; fi
+          git add packaging/appimage-pins.env
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'Update AppImage packaging tools'
+          git push origin HEAD:refs/heads/deps
+          gh workflow run deps.yml --ref deps

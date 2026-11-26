@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: deps
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * 5"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 1
+    groups:
+      rust:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: deps
+    schedule:
+      interval: cron
+      cronjob: "0 9 * * 5"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns: ["*"]
