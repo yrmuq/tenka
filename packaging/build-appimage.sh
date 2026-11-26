@@ -7,16 +7,15 @@ mkdir -p "$dist"
 appdir="$(mktemp -d "$dist/.appimage.XXXXXX")"
 trap 'rm -rf "$appdir"' EXIT
 
-tool_url=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-runtime_url=https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+source packaging/appimage-pins.env
+tool_url="https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_TAG/appimagetool-x86_64.AppImage"
+runtime_url="https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_TAG/runtime-x86_64"
 curl --retry 3 --fail --silent --show-error --location "$tool_url" --output "$appdir/appimagetool"
 curl --retry 3 --fail --silent --show-error --location "$runtime_url" --output "$appdir/runtime"
 (
     cd "$appdir"
-    sha256sum --check <<'CHECKSUMS'
-ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool
-2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime
-CHECKSUMS
+    printf '%s  appimagetool\n%s  runtime\n' "$APPIMAGETOOL_SHA" "$APPIMAGE_RUNTIME_SHA" |
+        sha256sum --check
 )
 chmod +x "$appdir/appimagetool"
 
@@ -29,16 +28,28 @@ ln -s usr/bin/tenka "$appdir/Tenka.AppDir/AppRun"
 
 asset=Tenka-x86_64.AppImage
 update="gh-releases-zsync|yrmuq|tenka|latest|$asset.zsync"
+files=("$asset")
+options=()
+case "${TENKA_CHANNEL:-dev}" in
+    stable) options=(-u "$update"); files+=("$asset.zsync") ;;
+    dev|deps) ;;
+    *) printf 'Unknown AppImage channel: %s\n' "$TENKA_CHANNEL" >&2; exit 1 ;;
+esac
 export ARCH=x86_64
 cd "$appdir"
 "$appdir/appimagetool" --appimage-extract-and-run --runtime-file "$appdir/runtime" \
-    -u "$update" "$appdir/Tenka.AppDir" "$asset"
+    "${options[@]}" "$appdir/Tenka.AppDir" "$asset"
 
-test -s "$asset.zsync"
-grep -aqF "$update" "$asset"
-grep -aqxF "Filename: $asset" "$asset.zsync"
-grep -aqxF "Length: $(stat --format=%s "$asset")" "$asset.zsync"
-grep -aqxF "SHA-1: $(sha1sum "$asset" | cut -d' ' -f1)" "$asset.zsync"
-sha256sum "$asset" "$asset.zsync" > SHA256SUMS
+if [[ "${TENKA_CHANNEL:-dev}" == stable ]]; then
+    test -s "$asset.zsync"
+    grep -aqF "$update" "$asset"
+    grep -aqxF "Filename: $asset" "$asset.zsync"
+    grep -aqxF "Length: $(stat --format=%s "$asset")" "$asset.zsync"
+    grep -aqxF "SHA-1: $(sha1sum "$asset" | cut -d' ' -f1)" "$asset.zsync"
+elif [[ -e "$asset.zsync" ]] || grep -aqF "$update" "$asset"; then
+    echo 'A non-stable AppImage contains stable update metadata.' >&2
+    exit 1
+fi
+sha256sum "${files[@]}" > SHA256SUMS
 sha256sum --check SHA256SUMS
-mv -- "$asset" "$asset.zsync" SHA256SUMS "$dist/"
+mv -- "${files[@]}" SHA256SUMS "$dist/"

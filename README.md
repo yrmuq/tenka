@@ -64,12 +64,18 @@ During conversion, the footer estimates the remaining time from up to ten comple
 
 | Format | x86_64 | arm64 |
 | --- | --- | --- |
-| AppImage | Development build in GitHub Actions | ❌ |
+| AppImage | ✅ | ❌ |
 | Flatpak | ❌ | ❌ |
+
+### Release scheme
+
+Stable versions follow `X.Y.0`. Versions `X.Y.Z` with `Z > 0` are automatic dependency prereleases. See the [latest stable release](https://github.com/yrmuq/tenka/releases/latest) or the [full release list](https://github.com/yrmuq/tenka/releases).
 
 ### AppImage
 
-Download the x86_64 package from the [development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). Open the `.AppImage` with [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever). Linux desktop file dialogs use the desktop portal. File drops work on native Wayland and X11. X11 sessions require the system libxkbcommon-x11 library. The `.zsync` file supplies delta-update metadata for compatible update tools.
+Download the x86_64 `.AppImage` from the [stable download page](https://github.com/yrmuq/tenka/releases/latest) or try an [AppImage development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). File dialogs use the Linux desktop portal. X11 sessions require the system `libxkbcommon-x11` library.
+
+[Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) can install and integrate the stable AppImage and apply supported updates. Import the `.AppImage` in Gear Lever. The stable AppImage embeds update metadata, and its companion `.zsync` enables delta updates for compatible tools.
 
 ### Flatpak
 
