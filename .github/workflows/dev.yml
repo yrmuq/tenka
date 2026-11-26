@@ -16,13 +16,13 @@ jobs:
       group: tenka-dev-build
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/build
         with:
           channel: dev
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Tenka-x86_64-${{ github.sha }}
           path: |
@@ -42,7 +42,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: Tenka-x86_64-${{ github.sha }}
           path: dist
