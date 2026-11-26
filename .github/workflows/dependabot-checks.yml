@@ -26,11 +26,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    outputs:
-      merged_tree: ${{ steps.snapshot.outputs.commit }}
     steps:
-      - name: Resolve the exact Dependabot merge snapshot
-        id: resolve
+      - name: Verify Dependabot request
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -41,43 +38,27 @@ jobs:
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GH_REPO/git/ref/heads/deps" --jq .object.sha)" = "$BASE_SHA"
-          for attempt in {1..12}; do
-            details=$(gh api "repos/$GH_REPO/pulls/$PR")
-            jq -e --arg repo "$GH_REPO" --arg head "$HEAD_SHA" '
-                .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
-                .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
-                .head.sha == $head and .base.ref == "deps"
-              ' <<< "$details" >/dev/null
-            if jq -e --arg base "$BASE_SHA" '.mergeable == false and .base.sha == $base' <<< "$details" >/dev/null; then
-              echo "PR #$PR conflicts with the current deps commit."
-              exit 1
-            fi
-            if commit=$(jq -er 'select(.mergeable == true) | .merge_commit_sha' <<< "$details") &&
-              [[ "$commit" =~ ^[0-9a-f]{40}$ ]] &&
-              parents=$(gh api "repos/$GH_REPO/git/commits/$commit" --jq '[.parents[].sha] | join(" ")') &&
-              [[ "$parents" == "$BASE_SHA $HEAD_SHA" ]]; then
-              printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "GitHub did not resolve a merge snapshot for PR #$PR at the requested commits."
-          exit 1
+          gh api "repos/$GH_REPO/pulls/$PR" | jq -e \
+            --arg repo "$GH_REPO" --arg head "$HEAD_SHA" '
+              .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
+              .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
+              .head.sha == $head and .base.ref == "deps"
+            '
       - uses: actions/checkout@v5
         with:
-          ref: ${{ steps.resolve.outputs.commit }}
-          fetch-depth: 2
+          ref: ${{ inputs.head }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Verify the tested merge snapshot
-        id: snapshot
+      - name: Merge the exact revisions for testing
         env:
           HEAD_SHA: ${{ inputs.head }}
           BASE_SHA: ${{ inputs.base }}
         run: |
           set -euo pipefail
-          commit=$(git rev-parse HEAD)
-          test "$(git show -s --format=%P HEAD)" = "$BASE_SHA $HEAD_SHA"
-          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git switch --detach "$BASE_SHA"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            merge --no-ff --no-commit "$HEAD_SHA"
       - name: Build and smoke-test the merged code
         uses: ./.github/actions/build
         with:
@@ -101,19 +82,17 @@ jobs:
       PR: ${{ inputs.number }}
       HEAD_SHA: ${{ inputs.head }}
       BASE_SHA: ${{ inputs.base }}
-      TESTED_COMMIT: ${{ needs.check.outputs.merged_tree }}
     steps:
       - name: Merge the tested PR and remove its branch
         run: |
           set -euo pipefail
-          [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$TESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PR" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           details=$(gh api "repos/$GH_REPO/pulls/$PR")
           base=$(gh api "repos/$GH_REPO/git/ref/heads/deps" --jq .object.sha)
-          if [[ "$base" != "$BASE_SHA" ]] || ! jq -e --arg repo "$GH_REPO" --arg head "$HEAD_SHA" --arg tested "$TESTED_COMMIT" '
+          if [[ "$base" != "$BASE_SHA" ]] || ! jq -e --arg repo "$GH_REPO" --arg head "$HEAD_SHA" '
             .state == "open" and .draft == false and .user.login == "dependabot[bot]" and
             .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
-            .head.sha == $head and .base.ref == "deps" and
-            .mergeable == true and .merge_commit_sha == $tested
+            .head.sha == $head and .base.ref == "deps"
           ' <<< "$details" >/dev/null; then
             echo "PR #$PR changed after testing or cannot be merged. Leaving it open."
             gh workflow run dependabot-queue.yml --ref main
