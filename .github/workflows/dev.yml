@@ -1,0 +1,151 @@
+name: Development build
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: tenka-dev-build
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        id: toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ libegl1 libgl1-mesa-dri libglx-mesa0 libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 weston xauth xdotool xvfb zsync
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: tenka-dev-ubuntu-2204-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-${{ github.sha }}
+          restore-keys: tenka-dev-ubuntu-2204-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-
+      - name: Verify workspace
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+      - name: Build AppImage
+        run: |
+          cargo build --release --locked -p tenka
+          ./packaging/build-appimage.sh
+      - name: Open the AppImage on a virtual display
+        run: |
+          xvfb-run -a bash -e -c '
+            export LIBGL_ALWAYS_SOFTWARE=1
+            ./dist/Tenka-x86_64.AppImage --appimage-extract-and-run &
+            app=$!
+            trap "kill $app 2>/dev/null || true" EXIT
+            timeout 30 xdotool search --sync --onlyvisible --name "^Tenka$"
+            kill -0 "$app"
+          '
+      - name: Open both AppImage windows over native Wayland
+        run: |
+          xvfb-run -a bash -euo pipefail -c '
+            export XDG_RUNTIME_DIR="$(mktemp -d)"
+            export WAYLAND_DISPLAY=wayland-tenka
+            export LIBGL_ALWAYS_SOFTWARE=1
+            unset WAYLAND_SOCKET
+            weston --backend=x11-backend.so --socket="$WAYLAND_DISPLAY" --no-config --idle-time=0 \
+              --width=1024 --height=768 --log="$XDG_RUNTIME_DIR/weston.log" &
+            compositor=$!
+            app=
+            trap '"'"'if [[ -n "$app" ]]; then kill "$app" 2>/dev/null || true; fi
+              kill "$compositor" 2>/dev/null || true
+              rm -rf "$XDG_RUNTIME_DIR"'"'"' EXIT
+            for attempt in {1..100}; do
+              [[ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] || break
+              sleep 0.1
+            done
+            if [[ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
+              cat "$XDG_RUNTIME_DIR/weston.log"
+              exit 1
+            fi
+            for window in convert compare; do
+              args=()
+              if [[ "$window" == compare ]]; then args=(--compare en light); fi
+              log="$XDG_RUNTIME_DIR/$window.log"
+              env -u DISPLAY WAYLAND_DEBUG=client ./dist/Tenka-x86_64.AppImage \
+                --appimage-extract-and-run "${args[@]}" >"$log" 2>&1 &
+              app=$!
+              for attempt in {1..100}; do
+                if grep -qE "xdg_surface[@#][0-9]+\.ack_configure" "$log"; then break; fi
+                if ! kill -0 "$app" 2>/dev/null; then break; fi
+                sleep 0.1
+              done
+              if ! grep -qE "xdg_surface[@#][0-9]+\.ack_configure" "$log" || ! kill -0 "$app"; then
+                cat "$XDG_RUNTIME_DIR/weston.log" "$log"
+                exit 1
+              fi
+              kill "$app"
+              wait "$app" || true
+              app=
+            done
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tenka-x86_64-${{ github.sha }}
+          path: |
+            dist/Tenka-x86_64.AppImage
+            dist/Tenka-x86_64.AppImage.zsync
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    concurrency:
+      group: tenka-dev-draft
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Tenka-x86_64-${{ github.sha }}
+          path: dist
+      - name: Verify and update the development draft
+        run: |
+          set -euo pipefail
+          head_sha=$(gh api "repos/$GH_REPO/git/ref/heads/dev" --jq '.object.sha')
+          if [[ "$head_sha" != "$GITHUB_SHA" ]]; then
+            echo "A newer dev commit is already available."
+            exit 0
+          fi
+
+          cd dist
+          sha256sum --check SHA256SUMS
+          tag=dev-draft
+          notes="AppImage development build from $GITHUB_SHA."
+          if gh release view "$tag" --json isDraft > draft.json 2>/dev/null; then
+            test "$(jq -r '.isDraft' draft.json)" = true
+            gh release edit "$tag" --target "$GITHUB_SHA" --notes "$notes" --draft
+          else
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Tenka development build" --notes "$notes"
+          fi
+          gh release upload "$tag" Tenka-x86_64.AppImage Tenka-x86_64.AppImage.zsync SHA256SUMS --clobber
+          gh release view "$tag" --json isDraft,targetCommitish,assets > draft.json
+          jq -e --arg sha "$GITHUB_SHA" '
+            .isDraft and .targetCommitish == $sha and
+            ([.assets[].name] | sort) == (["Tenka-x86_64.AppImage", "Tenka-x86_64.AppImage.zsync", "SHA256SUMS"] | sort)
+          ' draft.json
+          mkdir verified
+          gh release download "$tag" --dir verified --pattern 'Tenka-x86_64.AppImage*' --pattern SHA256SUMS
+          (cd verified && sha256sum --check SHA256SUMS)

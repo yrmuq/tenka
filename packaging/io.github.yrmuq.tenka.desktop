@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tenka
+Comment=Optimize images as JPEG XL
+Comment[ru]=Оптимизация изображений в JPEG XL
+Exec=tenka
+Icon=io.github.yrmuq.tenka
+Terminal=false
+Categories=Graphics;RasterGraphics;
+StartupWMClass=io.github.yrmuq.tenka

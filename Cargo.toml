@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/tenka-core", "crates/tenka-gui"]
+exclude = ["vendor/smithay-clipboard"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/yrmuq/tenka"
+
+[patch.crates-io]
+smithay-clipboard = { path = "vendor/smithay-clipboard" }
+
+[profile.release]
+strip = true
+lto = "thin"
