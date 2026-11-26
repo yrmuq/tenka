@@ -26,7 +26,7 @@ use eframe::egui::{
 };
 use estimate::{Estimate, InputSize};
 use file_drop::FileDrops;
-use jobs::{Conversion, Event, Failure, InputProbe};
+use jobs::{Conversion, Event, Failure, InputFile, InputProbe, ScannedInputs};
 use language::Catalog;
 use summary::Summary;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
@@ -78,7 +78,7 @@ enum Status {
 }
 
 struct QueueEntry {
-    path: PathBuf,
+    input: InputFile,
     size: Arc<OnceLock<InputSize>>,
     status: Status,
 }
@@ -112,6 +112,9 @@ struct Tenka {
     catalog: Catalog,
     queue: Vec<QueueEntry>,
     queue_jump: Option<usize>,
+    scan_requests: Sender<Vec<PathBuf>>,
+    scanned_inputs: Receiver<ScannedInputs>,
+    scans_pending: usize,
     input_probes: Sender<Vec<InputProbe>>,
     file_column_fraction: f32,
     folder: Option<PathBuf>,
@@ -161,6 +164,7 @@ impl Tenka {
                 };
             });
         }
+        let (scan_requests, scanned_inputs) = jobs::input_scanner(&context.egui_ctx);
         Self {
             catalog: Catalog::new(&language),
             language,
@@ -169,6 +173,9 @@ impl Tenka {
             file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
             queue_jump: None,
+            scan_requests,
+            scanned_inputs,
+            scans_pending: 0,
             input_probes: jobs::probe_inputs(),
             file_column_fraction: 0.5,
             folder: None,
@@ -296,15 +303,10 @@ impl Tenka {
                 );
                 let busy = self.worker.is_some();
                 let button = Rect::from_center_size(strip.center(), ADD_IMAGES_SIZE);
-                if ui
-                    .put(button, |ui: &mut Ui| {
-                        add_images_button(ui, &self.catalog, !busy)
-                    })
-                    .clicked()
-                    && let Some(files) = self.picker().pick_files()
-                {
-                    self.add_files(files);
-                }
+                let add = ui.put(button, |ui: &mut Ui| {
+                    add_images_button(ui, self.label(150), !busy)
+                });
+                self.show_add_menu(&add);
                 let pending = self.pending_count();
                 let estimate = self
                     .worker
@@ -328,7 +330,7 @@ impl Tenka {
                     egui::pos2(strip.right() - ADD_IMAGES_SIZE.x, strip.top()),
                     strip.max,
                 );
-                if busy {
+                if busy || self.scans_pending > 0 {
                     ui.put(spinner, egui::Spinner::new());
                 }
                 let error_area = Rect::from_min_max(
@@ -346,7 +348,7 @@ impl Tenka {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| match &entry.status {
-                    Status::Done(Err(error)) => Some((index, entry.path.as_path(), error)),
+                    Status::Done(Err(error)) => Some((index, entry.input.path.as_path(), error)),
                     _ => None,
                 });
         let count = errors.clone().count();
@@ -486,7 +488,10 @@ impl Tenka {
                             .fill(egui::Color32::from_rgb(175, 40, 50)),
                     )
                 } else {
-                    ui.add_enabled(pending > 0, Button::new(self.label(22)))
+                    ui.add_enabled(
+                        pending > 0 && self.scans_pending == 0,
+                        Button::new(self.label(22)),
+                    )
                 }
             })
             .clicked()
@@ -501,7 +506,9 @@ impl Tenka {
         if ui
             .put(center.translate(offset), |ui: &mut Ui| {
                 ui.add_enabled(
-                    !busy && (!self.queue.is_empty() || self.folder.is_some()),
+                    !busy
+                        && self.scans_pending == 0
+                        && (!self.queue.is_empty() || self.folder.is_some()),
                     Button::new(self.label(23)),
                 )
             })
@@ -523,12 +530,9 @@ impl Tenka {
             self.show_error(ui, error);
         }
         if self.queue.is_empty() {
-            if empty_drop_area(ui, &self.catalog)
-                && let Some(files) = self.picker().pick_files()
-            {
-                self.add_files(files);
-                ui.ctx().request_repaint();
-            }
+            let hint = self.label(if self.scans_pending > 0 { 149 } else { 152 });
+            let add = empty_drop_area(ui, hint, self.label(150));
+            self.show_add_menu(&add);
         } else {
             self.show_queue(ui, busy);
         }
@@ -622,7 +626,7 @@ impl Tenka {
             .iter()
             .enumerate()
             .filter(|(_, entry)| matches!(entry.status, Status::Pending))
-            .map(|(index, entry)| (index, entry.path.clone()))
+            .map(|(index, entry)| (index, entry.input.clone()))
             .collect();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.worker = Some(Batch {
@@ -747,8 +751,10 @@ impl Tenka {
                             let [file, output, preview, delete] = column_rects(row);
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
-                                    ui.add(egui::Label::new(file_name(&entry.path)).truncate())
-                                        .on_hover_text(path_label(&entry.path));
+                                    ui.add(
+                                        egui::Label::new(file_name(&entry.input.path)).truncate(),
+                                    )
+                                    .on_hover_text(path_label(&entry.input.path));
                                 };
                                 if let Status::Done(Err(error)) = &entry.status {
                                     ui.vertical(|ui| {
@@ -765,7 +771,7 @@ impl Tenka {
                                 })
                                 .clicked()
                             {
-                                reveal_path = Some(entry.path.clone());
+                                reveal_path = Some(entry.input.path.clone());
                             }
                             queue_cell(ui, output, |ui| {
                                 self.show_output(ui, &entry.status, &mut reveal_path);
@@ -792,7 +798,7 @@ impl Tenka {
                                 .clicked()
                                 && let Some(conversion) = conversion
                             {
-                                compare = Some([entry.path.clone(), conversion.path.clone()]);
+                                compare = Some([entry.input.path.clone(), conversion.path.clone()]);
                             }
                             let remove_rect =
                                 Rect::from_center_size(delete.center(), ROW_ACTION_SIZE);
@@ -892,25 +898,72 @@ impl Tenka {
         }
     }
 
-    fn picker(&self) -> rfd::FileDialog {
-        rfd::FileDialog::new().add_filter(self.label(65), &["jpg", "jpeg", "png", "webp"])
+    fn show_add_menu(&mut self, button: &egui::Response) {
+        let selection = egui::Popup::menu(button).show(|ui| {
+            if ui.button(self.label(151)).clicked() {
+                ui.close();
+                rfd::FileDialog::new()
+                    .add_filter(self.label(65), jobs::IMAGE_EXTENSIONS)
+                    .pick_files()
+            } else if ui.button(self.label(144)).clicked() {
+                ui.close();
+                rfd::FileDialog::new().pick_folder().map(|path| vec![path])
+            } else {
+                None
+            }
+        });
+        if let Some(paths) = selection.and_then(|menu| menu.inner) {
+            self.scan_paths(paths);
+        }
     }
 
-    fn add_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let paths: Vec<_> = paths.into_iter().collect();
+    fn scan_paths(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
+        if self.scan_requests.send(paths).is_ok() {
+            self.scans_pending += 1;
+        } else {
+            self.input_scanner_stopped();
+        }
+    }
+
+    fn input_scanner_stopped(&mut self) {
+        self.scans_pending = 0;
+        self.folder_failure = Some(Failure {
+            label: 148,
+            detail: String::new(),
+        });
+    }
+
+    fn poll_scans(&mut self) {
+        while self.scans_pending > 0 {
+            match self.scanned_inputs.try_recv() {
+                Ok(scanned) => {
+                    self.scans_pending -= 1;
+                    self.add_inputs(scanned.files);
+                    if let Some(failure) = scanned.failure {
+                        self.folder_failure = Some(failure);
+                    }
+                    self.finish_summary();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => self.input_scanner_stopped(),
+            }
+        }
+    }
+
+    fn add_inputs(&mut self, files: impl IntoIterator<Item = InputFile>) {
         let mut known: HashSet<_> = self
             .queue
             .iter()
-            .map(|entry| entry.path.as_path())
+            .map(|entry| entry.input.path.clone())
             .collect();
-        let entries: Vec<_> = paths
-            .iter()
-            .filter(|path| known.insert(path.as_path()))
-            .map(|path| QueueEntry {
-                path: path.clone(),
+        let entries: Vec<_> = files
+            .into_iter()
+            .filter(|input| known.insert(input.path.clone()))
+            .map(|input| QueueEntry {
+                input,
                 size: Arc::new(OnceLock::new()),
                 status: Status::Pending,
             })
@@ -918,12 +971,22 @@ impl Tenka {
         let probes = entries
             .iter()
             .map(|entry| InputProbe {
-                path: entry.path.clone(),
+                path: entry.input.path.clone(),
                 result: Arc::downgrade(&entry.size),
             })
             .collect();
         self.queue.extend(entries);
         let _ = self.input_probes.send(probes);
+    }
+
+    fn finish_summary(&mut self) {
+        if self.worker.is_none()
+            && self.scans_pending == 0
+            && self.pending_count() == 0
+            && self.batch_summary.attempted() > 0
+        {
+            self.completed_summary = Some(std::mem::take(&mut self.batch_summary));
+        }
     }
 
     fn poll_worker(&mut self) {
@@ -942,9 +1005,7 @@ impl Tenka {
                 Ok(Event::Finished(elapsed)) => {
                     self.batch_summary.elapsed += elapsed;
                     self.worker = None;
-                    if self.pending_count() == 0 && self.batch_summary.attempted() > 0 {
-                        self.completed_summary = Some(std::mem::take(&mut self.batch_summary));
-                    }
+                    self.finish_summary();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -1050,7 +1111,8 @@ impl eframe::App for Tenka {
             context.send_viewport_cmd(command);
         }
         self.system_theme.apply(context, self.theme);
-        self.add_files(self.file_drops.take(context));
+        self.scan_paths(self.file_drops.take(context));
+        self.poll_scans();
         self.poll_worker();
         if let Some(result) = self
             .folder_request
@@ -1104,7 +1166,7 @@ fn theme_id(theme: ThemePreference) -> u16 {
     }
 }
 
-fn empty_drop_area(ui: &mut Ui, catalog: &Catalog) -> bool {
+fn empty_drop_area(ui: &mut Ui, hint: &str, button_label: &str) -> egui::Response {
     let (area, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
     ui.painter().rect_stroke(
         area,
@@ -1121,19 +1183,18 @@ fn empty_drop_area(ui: &mut Ui, catalog: &Catalog) -> bool {
                 + ui.spacing().item_spacing.y
                 + ADD_IMAGES_SIZE.y;
             ui.add_space(((area.height() - content_height) * 0.5).max(0.0));
-            ui.label(catalog.text(11));
-            add_images_button(ui, catalog, true).clicked()
+            ui.label(hint);
+            add_images_button(ui, button_label, true)
         },
     )
     .inner
 }
 
-fn add_images_button(ui: &mut Ui, catalog: &Catalog, enabled: bool) -> egui::Response {
+fn add_images_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     let response = ui.add_enabled(
         enabled,
         Button::new(RichText::new("+").size(20.0)).min_size(ADD_IMAGES_SIZE),
     );
-    let label = catalog.text(8);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     response.on_hover_text(label)
 }
@@ -1203,13 +1264,60 @@ mod tests {
     }
 
     #[test]
+    fn the_add_menu_and_dropping_a_folder_work_in_the_conversion_window() {
+        use eframe::App as _;
+
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.catalog = Catalog::new("en");
+        let render = |app: &mut Tenka, events, dropped_files| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                    events,
+                    dropped_files,
+                    ..Default::default()
+                },
+                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+            )
+        };
+
+        let empty = render(&mut app, Vec::new(), Vec::new());
+        let add = text_position(&empty, "+").unwrap();
+        render(&mut app, click(add), Vec::new());
+        let menu = render(&mut app, Vec::new(), Vec::new());
+        assert!(text_position(&menu, "Add files").is_some());
+        assert!(text_position(&menu, "Add folder").is_some());
+
+        let folder = tempfile::tempdir().unwrap();
+        let input = folder.path().join("nested/image.png");
+        std::fs::create_dir(input.parent().unwrap()).unwrap();
+        std::fs::write(&input, []).unwrap();
+        render(
+            &mut app,
+            Vec::new(),
+            vec![egui::DroppedFile {
+                path: Some(folder.path().to_owned()),
+                ..Default::default()
+            }],
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.queue.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            render(&mut app, Vec::new(), Vec::new());
+        }
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].input.path, input);
+    }
+
+    #[test]
     fn clicking_an_error_scrolls_to_its_row_in_the_queue() {
         let ctx = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         app.catalog = Catalog::new("en");
         app.queue = (0..32)
             .map(|index| QueueEntry {
-                path: PathBuf::from(format!("image-{index}.jpg")),
+                input: InputFile::from(PathBuf::from(format!("image-{index}.jpg"))),
                 size: Arc::new(OnceLock::new()),
                 status: if index == 31 {
                     Status::Done(Err(Failure {
@@ -1258,7 +1366,10 @@ mod tests {
         let ctx = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         app.catalog = Catalog::new("en");
-        app.add_files(["old.jpg", "saved.jpg", "skipped.jpg", "failed.jpg"].map(PathBuf::from));
+        app.add_inputs(
+            ["old.jpg", "saved.jpg", "skipped.jpg", "failed.jpg"]
+                .map(|name| InputFile::from(PathBuf::from(name))),
+        );
         let output = || Conversion {
             path: PathBuf::from("/results/saved.jxl"),
             source_bytes: 2048,

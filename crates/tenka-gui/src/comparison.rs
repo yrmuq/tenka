@@ -157,9 +157,10 @@ impl Comparison {
             let drop_area = area.shrink2(vec2(20.0, 15.0));
             if ui
                 .scope_builder(egui::UiBuilder::new().max_rect(drop_area), |ui| {
-                    empty_drop_area(ui, &self.catalog)
+                    empty_drop_area(ui, self.catalog.text(11), self.catalog.text(8))
                 })
                 .inner
+                .clicked()
             {
                 self.pick_images();
                 self.load_images(ui.ctx());
@@ -312,7 +313,7 @@ impl eframe::App for Comparison {
                 && ui
                     .put(
                         Rect::from_min_size(controls.min, ADD_IMAGES_SIZE),
-                        |ui: &mut Ui| add_images_button(ui, &self.catalog, true),
+                        |ui: &mut Ui| add_images_button(ui, self.catalog.text(8), true),
                     )
                     .clicked()
             {

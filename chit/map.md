@@ -4,7 +4,7 @@
 - `crates/tenka-core/src/raster.rs` handles input validation, color and orientation normalization, resizing, and reference-scale SSIMULACRA2 scoring.
 - `crates/tenka-core/src/jxl_header.rs` validates JPEG XL dimensions, bit depth, and animation before decoding files for comparison.
 - `crates/tenka-gui/src/main.rs` implements the conversion window and routes batch work through a background worker.
-- `crates/tenka-gui/src/jobs.rs` bridges the desktop interface to the library, probes queued file sizes and dimensions, reveals files in the desktop file manager, and handles file I/O.
+- `crates/tenka-gui/src/jobs.rs` bridges the desktop interface to the library, scans imported folders, probes queued file sizes and dimensions, and handles file saving and file-manager requests.
 - `crates/tenka-gui/src/estimate.rs` estimates remaining batch time from input byte sizes, pixel counts, and recent conversion timings.
 - `crates/tenka-gui/src/summary.rs` accumulates conversion counts, saved output sizes, and active time across pause and resume.
 - `crates/tenka-gui/src/comparison.rs` runs the comparison window and synchronizes zoom and pan between full-resolution images.

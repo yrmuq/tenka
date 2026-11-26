@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{self, BufReader, Read, Write},
     ops::ControlFlow::{self, Break, Continue},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
@@ -16,6 +16,28 @@ use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
 use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source};
 
 use crate::estimate::{InputSize, Timing};
+
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+
+#[derive(Clone)]
+pub struct InputFile {
+    pub path: PathBuf,
+    relative_folder: PathBuf,
+}
+
+impl From<PathBuf> for InputFile {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            relative_folder: PathBuf::new(),
+        }
+    }
+}
+
+pub struct ScannedInputs {
+    pub files: Vec<InputFile>,
+    pub failure: Option<Failure>,
+}
 
 pub enum Event {
     Started(usize),
@@ -84,20 +106,20 @@ impl From<tenka_core::Error> for Failure {
 
 pub fn convert(
     context: &Context,
-    files: Vec<(usize, PathBuf)>,
+    files: Vec<(usize, InputFile)>,
     output_folder: Option<PathBuf>,
     options: Options,
     mode: OptimizationMode,
     cancelled: Arc<AtomicBool>,
 ) -> Receiver<Event> {
     run(context, move |emit| {
-        for (idx, path) in files {
+        for (idx, input) in files {
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
             emit(Event::Started(idx));
             let result =
-                match convert_one(&path, output_folder.as_deref(), options, mode, &cancelled) {
+                match convert_one(&input, output_folder.as_deref(), options, mode, &cancelled) {
                     Ok(Continue(result)) => Ok(result),
                     Ok(Break(())) => {
                         emit(Event::Interrupted(idx));
@@ -108,6 +130,83 @@ pub fn convert(
             emit(Event::Converted(idx, result));
         }
     })
+}
+
+pub fn input_scanner(context: &Context) -> (Sender<Vec<PathBuf>>, Receiver<ScannedInputs>) {
+    let context = context.clone();
+    let (requests, scan) = mpsc::channel::<Vec<PathBuf>>();
+    let (send, results) = mpsc::channel();
+    std::thread::spawn(move || {
+        for paths in scan {
+            if send.send(scan_inputs(paths)).is_err() {
+                break;
+            }
+            context.request_repaint();
+        }
+    });
+    (requests, results)
+}
+
+fn scan_inputs(paths: Vec<PathBuf>) -> ScannedInputs {
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        if !path.is_dir() {
+            files.push(InputFile::from(path));
+            continue;
+        }
+        let start = files.len();
+        let root_name = path.file_name().map(PathBuf::from).unwrap_or_default();
+        let mut folders = vec![(path, root_name)];
+        while let Some((folder, relative_folder)) = folders.pop() {
+            let entries = match fs::read_dir(&folder) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", folder.display()));
+                    continue;
+                }
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        errors.push(format!("{}: {error}", folder.display()));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => {
+                        folders.push((path, relative_folder.join(entry.file_name())));
+                    }
+                    Ok(kind) if kind.is_file() && is_supported_image(&path) => {
+                        files.push(InputFile {
+                            path,
+                            relative_folder: relative_folder.clone(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => errors.push(format!("{}: {error}", path.display())),
+                }
+            }
+        }
+        files[start..].sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    }
+    let failure = (!errors.is_empty()).then(|| Failure {
+        label: 145,
+        detail: errors.join("\n"),
+    });
+    ScannedInputs { files, failure }
+}
+
+fn is_supported_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
 }
 
 pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
@@ -266,14 +365,14 @@ fn run(context: &Context, work: impl FnOnce(&dyn Fn(Event)) + Send + 'static) ->
 }
 
 fn convert_one(
-    path: &Path,
+    source: &InputFile,
     folder: Option<&Path>,
     options: Options,
     mode: OptimizationMode,
     cancelled: &AtomicBool,
 ) -> Result<ControlFlow<(), CompletedConversion>, Failure> {
     let start = Instant::now();
-    let input = read_image(path);
+    let input = read_image(&source.path);
     let read = start.elapsed();
     if cancelled.load(Ordering::Relaxed) {
         return Ok(Break(()));
@@ -285,11 +384,22 @@ fn convert_one(
     }
     let ((width, height), output) = output?;
     let output = match output {
-        Some(output) => Some(Conversion {
-            path: save_image(path, folder, output.setting.format(), &output.bytes)?,
-            source_bytes: bytes.len(),
-            bytes: output.bytes.len(),
-        }),
+        Some(output) => {
+            let mirrored = folder
+                .filter(|_| !source.relative_folder.as_os_str().is_empty())
+                .map(|root| create_output_subfolder(root, &source.relative_folder))
+                .transpose()?;
+            Some(Conversion {
+                path: save_image(
+                    &source.path,
+                    mirrored.as_deref().or(folder),
+                    output.setting.format(),
+                    &output.bytes,
+                )?,
+                source_bytes: bytes.len(),
+                bytes: output.bytes.len(),
+            })
+        }
         None => None,
     };
     Ok(Continue(CompletedConversion {
@@ -301,6 +411,32 @@ fn convert_one(
             processing: start.elapsed() - read,
         },
     }))
+}
+
+fn create_output_subfolder(root: &Path, relative: &Path) -> Result<PathBuf, Failure> {
+    let mut folder = root.to_owned();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(Failure {
+                label: 146,
+                detail: relative.display().to_string(),
+            });
+        };
+        folder.push(name);
+        match fs::create_dir(&folder) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) => {}
+            Err(error) => {
+                return Err(Failure {
+                    label: 147,
+                    detail: format!("{}\n{error}", folder.display()),
+                });
+            }
+        }
+    }
+    Ok(folder)
 }
 
 fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
@@ -366,6 +502,66 @@ fn save_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_folders_keep_their_structure_and_existing_outputs() {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x11, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0x10, 0x31, 0x72, 0x4b, 0xe9, 0x39, 0xc1, 0x00, 0xa1, 0x00, 0x1b, 0x16,
+            0x04, 0x89, 0x7e, 0x7c, 0xdd, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+            0xae, 0x42, 0x60, 0x82,
+        ];
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Фото");
+        let destination = temp.path().join("Вывод");
+        fs::create_dir_all(source.join("Отпуск/День 1")).unwrap();
+        fs::write(source.join("кадр.PNG"), PNG).unwrap();
+        fs::write(source.join("Отпуск/День 1/кадр.PNG"), PNG).unwrap();
+        fs::write(source.join("Отпуск/notes.txt"), b"notes").unwrap();
+        let existing = destination.join("Фото/кадр.jxl");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"existing").unwrap();
+
+        let scanned = scan_inputs(vec![source.clone()]);
+        assert!(scanned.failure.is_none());
+        assert_eq!(scanned.files.len(), 2);
+        let convert = |input, folder| {
+            let Continue(completed) = convert_one(
+                input,
+                folder,
+                Options::default(),
+                OptimizationMode::Best,
+                &AtomicBool::new(false),
+            )
+            .unwrap() else {
+                panic!("conversion was interrupted");
+            };
+            completed.output.unwrap().path
+        };
+        let mut outputs: Vec<_> = scanned
+            .files
+            .iter()
+            .map(|input| convert(input, Some(&destination)))
+            .collect();
+        outputs.sort();
+        assert_eq!(
+            outputs,
+            [
+                destination.join("Фото/Отпуск/День 1/кадр.jxl"),
+                destination.join("Фото/кадр-1.jxl"),
+            ]
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"existing");
+        let input = scanned
+            .files
+            .iter()
+            .find(|input| input.path == source.join("кадр.PNG"))
+            .unwrap();
+        assert_eq!(convert(input, None), source.join("кадр.jxl"));
+        assert_eq!(fs::read(&input.path).unwrap(), PNG);
+    }
 
     #[test]
     fn saving_the_same_format_preserves_the_input_and_existing_outputs() {
