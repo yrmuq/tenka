@@ -1,6 +1,25 @@
 use std::sync::mpsc::{self, Receiver};
 
-use eframe::egui::{Context, ThemePreference};
+use eframe::egui::{Color32, Context, Theme, ThemePreference, Ui};
+
+pub(crate) const CONVERT_ACCENT: Color32 = Color32::from_rgb(242, 143, 46);
+pub(crate) const ACCENT_TEXT: Color32 = Color32::from_gray(25);
+
+pub(crate) fn apply_light_text_contrast(context: &Context) {
+    context.style_mut_of(Theme::Light, |style| {
+        style.visuals.override_text_color = Some(ACCENT_TEXT);
+        style.visuals.weak_text_color = Some(Color32::from_gray(77));
+    });
+}
+
+pub(crate) fn accent_selection(ui: &mut Ui) {
+    let visuals = ui.visuals_mut();
+    if visuals.dark_mode {
+        visuals.override_text_color = None;
+    }
+    visuals.selection.bg_fill = CONVERT_ACCENT;
+    visuals.selection.stroke.color = ACCENT_TEXT;
+}
 
 pub(crate) struct SystemTheme {
     updates: Receiver<ThemePreference>,
@@ -118,5 +137,27 @@ mod tests {
         assert_eq!(portal_theme(&Variant::U32(0)), ThemePreference::Light);
         let wrapped = Variant::Variant(Box::new(Variant::U32(2)));
         assert_eq!(portal_theme(&wrapped), ThemePreference::Light);
+    }
+
+    #[test]
+    fn selected_conversion_options_use_dark_text_on_the_orange_accent() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let context = Context::default();
+            context.set_theme(theme);
+            apply_light_text_contrast(&context);
+            let output = crate::tests::render_ui(&context, Default::default(), |ui| {
+                accent_selection(ui);
+                let _ = ui.selectable_label(true, "Selected");
+            });
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                eframe::egui::Shape::Rect(rect) if rect.fill == CONVERT_ACCENT
+            )));
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                eframe::egui::Shape::Text(text) if text.galley.text() == "Selected"
+                    && text.override_text_color.unwrap_or(text.fallback_color) == ACCENT_TEXT
+            )));
+        }
     }
 }

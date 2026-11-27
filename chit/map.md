@@ -13,7 +13,8 @@
 - `crates/tenka-gui/src/summary.rs` accumulates conversion counts, saved output sizes, and active time across pause and resume.
 - `crates/tenka-gui/src/comparison.rs` runs the comparison window and synchronizes zoom and pan between full-resolution images.
 - `crates/tenka-gui/src/language.rs` loads the English and Russian catalogs from `languages/`.
-- `crates/tenka-gui/src/theme.rs` follows system appearance through the Linux settings portal for both windows.
+- `crates/tenka-gui/src/theme.rs` applies app colors and follows system appearance through the Linux settings portal for both windows.
+- `crates/tenka-gui/src/window_icon.rs` provides desktop icon metadata for standalone AppImages on Wayland.
 - `crates/tenka-gui/src/icons.rs` draws the language, appearance, and comparison buttons.
 - `crates/tenka-gui/src/file_drop.rs` reads dropped file paths from egui for both windows.
 - `packaging/` builds the AppImage and stable update metadata. The shared build action tests the workspace and starts the AppImage on X11 and Wayland.

@@ -10,6 +10,7 @@ use crate::{
     APP_ICON, icons,
     jobs::Failure,
     language::Catalog,
+    theme::CONVERT_ACCENT,
     updates::{self, ReleaseStatus},
     window_size::WindowSize,
 };
@@ -18,6 +19,7 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const LICENSE: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/LICENSE");
 const LOGO_SIZE: egui::Vec2 = egui::vec2(88.0, 88.0);
 const COLUMN_SPACING: f32 = 18.0;
+const ROW_SPACING: f32 = 9.0;
 const MIN_COLUMN_WIDTH: f32 = 120.0;
 
 #[derive(Clone, Copy, Default)]
@@ -131,8 +133,12 @@ impl About {
         let layout = self.table_layout;
         let response = egui::Modal::new(egui::Id::unique("about_tenka")).show(context, |ui| {
             ui.set_width(688.0);
+            ui.visuals_mut().hyperlink_color = if ui.visuals().dark_mode {
+                CONVERT_ACCENT
+            } else {
+                egui::Color32::from_rgb(162, 74, 0)
+            };
             ui.horizontal(|ui| {
-                ui.heading(catalog.text(153));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::close(ui, catalog.text(142)).clicked() {
                         ui.close_kind(egui::UiKind::Modal);
@@ -306,6 +312,7 @@ fn components() -> &'static [Component] {
 }
 
 fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
+    let mut row_dividers = Vec::with_capacity(components().len());
     let grid = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(inset);
@@ -313,14 +320,14 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
             .num_columns(3)
             .min_col_width(MIN_COLUMN_WIDTH)
             .max_col_width(350.0)
-            .spacing(egui::vec2(COLUMN_SPACING, 9.0))
-            .striped(true)
+            .spacing(egui::vec2(COLUMN_SPACING, ROW_SPACING))
             .show(ui, |ui| {
                 let first = ui.strong(catalog.text(166));
                 let upstream = ui.strong(catalog.text(167));
                 let details = ui.strong(catalog.text(168));
                 ui.end_row();
                 for component in components() {
+                    row_dividers.push(ui.next_widget_position().y - ROW_SPACING * 0.5);
                     ui.label(component.name);
                     ui.hyperlink_to(component.upstream, component.url);
                     ui.label(catalog.translate(component.details));
@@ -332,10 +339,24 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
                 )
             })
     });
+    let grid = grid.inner;
+    let (upstream, details) = grid.inner;
+    let body = grid.response.rect;
+    let border = body.expand2(egui::vec2(COLUMN_SPACING, ROW_SPACING) * 0.5);
+    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    ui.painter()
+        .rect_stroke(border, 0.0, stroke, egui::StrokeKind::Inside);
+    for column in [upstream, details] {
+        ui.painter()
+            .vline(border.left() + column, border.y_range(), stroke);
+    }
+    for row in row_dividers {
+        ui.painter().hline(border.x_range(), row, stroke);
+    }
     TableLayout {
-        width: grid.inner.response.rect.width(),
-        upstream: grid.inner.inner.0,
-        details: grid.inner.inner.1,
+        width: body.width(),
+        upstream,
+        details,
     }
 }
 
@@ -379,12 +400,15 @@ mod tests {
             render(&mut about);
         }
         let output = render(&mut about);
-        let stripe = output
+        let table_border = output
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
                 egui::Shape::Rect(rect)
-                    if rect.rect.width() > 360.0 && (15.0..50.0).contains(&rect.rect.height()) =>
+                    if rect.rect.width() > 360.0
+                        && rect.rect.height() > 160.0
+                        && rect.fill == egui::Color32::TRANSPARENT
+                        && !rect.stroke.is_empty() =>
                 {
                     Some(rect.rect)
                 }
@@ -392,8 +416,8 @@ mod tests {
             })
             .unwrap();
         assert!(
-            (stripe.center().x - screen.center().x).abs() <= 1.0,
-            "{stripe:?}"
+            (table_border.center().x - screen.center().x).abs() <= 1.0,
+            "{table_border:?}"
         );
         let logo = output
             .shapes
@@ -416,6 +440,7 @@ mod tests {
                 .unwrap()
         };
         let logo_anchor = logo.min + about.logo.as_ref().unwrap().anchor;
+        assert!((logo_anchor.x - table_border.left() - COLUMN_SPACING * 0.5).abs() <= 1.0);
         assert!((logo_anchor.x - text_rect(catalog.text(166)).left()).abs() <= 1.0);
         let title = text_rect("Tenka");
         assert!((title.left() - text_rect(catalog.text(167)).left()).abs() <= 1.0);

@@ -9,6 +9,8 @@ mod language;
 mod summary;
 mod theme;
 mod updates;
+#[cfg(target_os = "linux")]
+mod window_icon;
 mod window_size;
 
 use std::{
@@ -38,9 +40,13 @@ use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
 const ACTION_GAP: f32 = 15.0;
+const APP_ID: &str = "io.github.yrmuq.tenka";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "linux")]
+    window_icon::register_appimage_icon();
+
     let icon =
         eframe::icon_data::from_png_bytes(APP_ICON).expect("the embedded Tenka icon is valid PNG");
     let mut args = std::env::args_os().skip(1);
@@ -55,7 +61,7 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_app_id("io.github.yrmuq.tenka")
+            .with_app_id(APP_ID)
             .with_icon(icon),
         window_builder: Some(Box::new(|window| {
             window
@@ -143,7 +149,18 @@ impl Tenka {
             .filter(|value| value == "en")
             .unwrap_or_else(|| "system".into());
         let theme = parse_theme(read("theme").as_deref());
+        let format = read("output_format");
+        let format = OutputFormat::ALL
+            .into_iter()
+            .find(|item| Some(item.extension()) == format.as_deref())
+            .unwrap_or_default();
+        let mode = match read("optimization_mode").as_deref() {
+            Some("balance") => OptimizationMode::Balance,
+            Some("cheap") => OptimizationMode::Cheap,
+            _ => OptimizationMode::Best,
+        };
         context.egui_ctx.set_theme(theme);
+        theme::apply_light_text_contrast(&context.egui_ctx);
         for appearance in [egui::Theme::Light, egui::Theme::Dark] {
             context.egui_ctx.style_mut_of(appearance, |style| {
                 style.spacing.item_spacing = egui::vec2(10.0, 8.0);
@@ -183,8 +200,8 @@ impl Tenka {
             input_probes: jobs::probe_inputs(),
             file_column_fraction: 0.5,
             folder: None,
-            format: OutputFormat::default(),
-            mode: OptimizationMode::default(),
+            format,
+            mode,
             folder_failure: None,
             folder_request: None,
             worker: None,
@@ -259,6 +276,7 @@ impl Tenka {
             .selected_text(self.format.name())
             .width(96.0)
             .show_ui(ui, |ui| {
+                theme::accent_selection(ui);
                 for format in OutputFormat::ALL {
                     ui.selectable_value(&mut self.format, format, format.name());
                 }
@@ -280,6 +298,7 @@ impl Tenka {
             .selected_text(self.label(selected))
             .width(96.0)
             .show_ui(ui, |ui| {
+                theme::accent_selection(ui);
                 for (mode, label, hint) in modes {
                     let label = self.label(label);
                     let hint = self.label(hint);
@@ -497,8 +516,8 @@ impl Tenka {
                 } else {
                     ui.add_enabled(
                         pending > 0 && self.scans_pending == 0,
-                        Button::new(RichText::new(self.label(22)).color(egui::Color32::BLACK))
-                            .fill(egui::Color32::from_rgb(242, 143, 46)),
+                        Button::new(RichText::new(self.label(22)).color(theme::ACCENT_TEXT))
+                            .fill(theme::CONVERT_ACCENT),
                     )
                 }
             })
@@ -1200,6 +1219,13 @@ impl eframe::App for Tenka {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("language", self.language.clone());
         storage.set_string("theme", theme_name(self.theme).into());
+        storage.set_string("output_format", self.format.extension().into());
+        let mode = match self.mode {
+            OptimizationMode::Best => "best",
+            OptimizationMode::Balance => "balance",
+            OptimizationMode::Cheap => "cheap",
+        };
+        storage.set_string("optimization_mode", mode.into());
     }
 }
 
@@ -1335,6 +1361,49 @@ mod tests {
     }
 
     #[test]
+    fn conversion_choices_restore_on_startup_and_default_for_old_settings() {
+        use eframe::{App as _, Storage};
+
+        #[derive(Default)]
+        struct MemoryStorage(std::collections::HashMap<String, String>);
+
+        impl Storage for MemoryStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+
+            fn flush(&mut self) {}
+        }
+
+        let start = |storage: &dyn Storage| {
+            let mut creation = eframe::CreationContext::_new_kittest(Context::default());
+            creation.storage = Some(storage);
+            Tenka::new(&creation)
+        };
+        let mut storage = MemoryStorage::default();
+        storage.set_string("language", "en".into());
+        let mut app = start(&storage);
+        assert_eq!(app.mode, OptimizationMode::Best);
+        assert_eq!(app.format, OutputFormat::JpegXl);
+
+        app.mode = OptimizationMode::Cheap;
+        app.format = OutputFormat::Webp;
+        app.save(&mut storage);
+        let restarted = start(&storage);
+        assert_eq!(restarted.mode, OptimizationMode::Cheap);
+        assert_eq!(restarted.format, OutputFormat::Webp);
+        assert_eq!(restarted.language, "en");
+    }
+
+    #[test]
     fn output_dialog_starts_at_the_first_remaining_file() {
         let context = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(context));
@@ -1394,7 +1463,6 @@ mod tests {
         }
         let about = render(Vec::new());
         for label in [
-            "About",
             "Repository",
             "GitHub",
             "License",
@@ -1407,6 +1475,7 @@ mod tests {
         ] {
             assert!(text_position(&about, label).is_some(), "{label}");
         }
+        assert!(text_position(&about, "About").is_none());
 
         let logo = about
             .shapes
@@ -1418,12 +1487,12 @@ mod tests {
             .unwrap();
         for _ in 0..4 {
             render(click(logo));
-            assert!(text_position(&render(Vec::new()), "Window settings").is_none());
+            assert!(text_position(&render(Vec::new()), "Secret menu").is_none());
         }
         render(click(logo));
         render(Vec::new());
         let settings = render(Vec::new());
-        for label in ["Window settings", "Width", "Height", "760", "620", "Reset"] {
+        for label in ["Secret menu", "Width", "Height", "760", "620", "Reset"] {
             assert!(text_position(&settings, label).is_some(), "{label}");
         }
         render(click(text_position(&settings, "760").unwrap()));
@@ -1461,7 +1530,7 @@ mod tests {
         assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == MAIN_WINDOW_SIZE)));
 
         render(click(Pos2::new(10.0, 10.0)));
-        assert!(text_position(&render(Vec::new()), "Window settings").is_some());
+        assert!(text_position(&render(Vec::new()), "Secret menu").is_some());
         render(vec![InputEvent::Key {
             key: egui::Key::Escape,
             physical_key: None,
@@ -1469,7 +1538,7 @@ mod tests {
             repeat: false,
             modifiers: Modifiers::NONE,
         }]);
-        assert!(text_position(&render(Vec::new()), "About").is_some());
+        assert!(text_position(&render(Vec::new()), "Repository").is_some());
     }
 
     #[test]

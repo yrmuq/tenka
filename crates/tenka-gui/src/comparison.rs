@@ -34,6 +34,7 @@ pub fn run(
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([320.0, 240.0])
             .with_maximized(true),
+        window_builder: Some(Box::new(|window| window.with_app_id(crate::APP_ID))),
         persist_window: false,
         ..Default::default()
     };
@@ -42,6 +43,7 @@ pub fn run(
         options,
         Box::new(move |creation| {
             creation.egui_ctx.set_theme(theme);
+            crate::theme::apply_light_text_contrast(&creation.egui_ctx);
             let mut comparison = Comparison {
                 catalog,
                 theme,

@@ -98,7 +98,6 @@ impl ImageInfo {
             ui.set_width(470.0);
             let top = ui.next_widget_position().y;
             ui.horizontal(|ui| {
-                ui.heading(catalog.text(184));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::close(ui, catalog.text(142)).clicked() {
                         ui.close_kind(egui::UiKind::Modal);
@@ -405,6 +404,7 @@ mod tests {
         assert!(visible("Created"));
         assert!(visible("Modified"));
         assert!(visible("EXIF data"));
+        assert!(!visible("Image information"));
         assert!(!visible("Camera model"));
     }
 }
