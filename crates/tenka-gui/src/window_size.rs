@@ -1,17 +1,16 @@
 use eframe::egui::{self, Context, ViewportCommand};
-use serde::{Deserialize, Serialize};
 
 use crate::{icons, language::Catalog};
 
-const DEFAULT_WIDTH: u16 = 960;
-const DEFAULT_HEIGHT: u16 = 650;
+const DEFAULT_WIDTH: u16 = 760;
+const DEFAULT_HEIGHT: u16 = 620;
 const MIN_WIDTH: u16 = 760;
 const MIN_HEIGHT: u16 = 480;
 const MAX_DIMENSION: u16 = 8192;
-const STORAGE_KEY: &str = "main_window_size";
 pub const DEFAULT_SIZE: egui::Vec2 = egui::vec2(DEFAULT_WIDTH as f32, DEFAULT_HEIGHT as f32);
+pub const MIN_SIZE: egui::Vec2 = egui::vec2(MIN_WIDTH as f32, MIN_HEIGHT as f32);
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq)]
 struct Settings {
     resizable: bool,
     width: u16,
@@ -21,7 +20,7 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            resizable: false,
+            resizable: true,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
         }
@@ -43,32 +42,24 @@ pub struct WindowSize {
     settings: Settings,
     last_inner_size: Option<egui::Vec2>,
     resize_pending: bool,
+    starting: bool,
 }
 
 impl WindowSize {
-    pub fn load(context: &Context, storage: Option<&dyn eframe::Storage>) -> Self {
-        let mut settings: Settings = storage
-            .and_then(|storage| eframe::get_value(storage, STORAGE_KEY))
-            .unwrap_or_default();
-        settings.clamp_size();
-        let mut window = Self {
-            settings,
+    pub fn new() -> Self {
+        Self {
+            settings: Settings::default(),
             last_inner_size: None,
             resize_pending: false,
-        };
-        window.apply(context);
-        window
-    }
-
-    pub fn save(&self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, STORAGE_KEY, &self.settings);
+            starting: true,
+        }
     }
 
     fn apply(&mut self, context: &Context) {
         let Settings { resizable, .. } = self.settings;
         let size = self.settings.size();
         let minimum = if resizable {
-            egui::vec2(f32::from(MIN_WIDTH), f32::from(MIN_HEIGHT))
+            MIN_SIZE
         } else {
             size
         };
@@ -87,10 +78,15 @@ impl WindowSize {
             maximize: resizable,
         });
         self.resize_pending = true;
-        self.update(context);
     }
 
     pub fn update(&mut self, context: &Context) {
+        if std::mem::take(&mut self.starting) {
+            self.apply(context);
+            // The first show can still restore geometry from an older build.
+            context.request_repaint();
+            return;
+        }
         let (fullscreen, maximized, inner_size) = context.input(|input| {
             let viewport = input.viewport();
             (
@@ -166,7 +162,13 @@ impl WindowSize {
             });
         if previous != self.settings {
             self.apply(context);
+            self.update(context);
         }
-        dialog.should_close()
+        dialog.response.should_close()
+            || (dialog.is_top_modal
+                && !dialog.any_popup_open
+                && context.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                }))
     }
 }

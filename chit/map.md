@@ -1,11 +1,12 @@
 # Repository map
 
-- `crates/tenka-core/src/lib.rs` exposes automatic conversion policy and the JPEG XL/WebP codec and measurement API.
+- `crates/tenka-core/src/lib.rs` exposes automatic conversion policy, image inspection, and the JPEG XL/WebP codec and measurement API.
 - `crates/tenka-core/src/raster.rs` handles input validation, color and orientation normalization, resizing, and reference-scale SSIMULACRA2 scoring.
 - `crates/tenka-core/src/jxl_header.rs` validates JPEG XL dimensions, bit depth, and animation before decoding files for comparison.
 - `crates/tenka-gui/src/main.rs` implements the conversion window and routes batch work through a background worker.
 - `crates/tenka-gui/src/about.rs` renders About, reads attribution rows from the README, and opens the hidden window settings from the logo.
-- `crates/tenka-gui/src/window_size.rs` persists the main window dimensions and resize lock and applies them to the native viewport.
+- `crates/tenka-gui/src/window_size.rs` applies main window dimensions and resize constraints to the native viewport.
+- `crates/tenka-gui/src/image_info.rs` loads image and filesystem metadata in the background and shows the details dialog.
 - `crates/tenka-gui/src/updates.rs` checks GitHub for a newer stable release when requested from About.
 - `crates/tenka-gui/src/jobs.rs` bridges the desktop interface to the library, scans imported folders, probes queued file sizes and dimensions, and handles file saving and file-manager requests.
 - `crates/tenka-gui/src/estimate.rs` estimates remaining batch time from input byte sizes, pixel counts, and recent conversion timings.

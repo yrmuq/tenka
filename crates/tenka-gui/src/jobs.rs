@@ -442,7 +442,7 @@ fn create_output_subfolder(root: &Path, relative: &Path) -> Result<PathBuf, Fail
     Ok(folder)
 }
 
-fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
+pub(crate) fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
     let result = (|| {
         if !fs::metadata(path)?.is_file() {
             return Err(io::Error::new(

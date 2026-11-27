@@ -256,6 +256,78 @@ pub fn decode_for_comparison(bytes: &[u8]) -> Result<RgbaImage> {
     }
 }
 
+/// Information obtained from an image's bytes, independent of its filename.
+pub struct ImageDetails {
+    pub format: Option<String>,
+    pub extensions: &'static [&'static str],
+    pub dimensions: Option<(u32, u32)>,
+    pub preview: Option<RgbaImage>,
+    pub exif: Vec<(String, String)>,
+}
+
+pub fn inspect_image(bytes: &[u8]) -> Result<ImageDetails> {
+    use std::io::Cursor;
+
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(Error::Limits);
+    }
+
+    let jxl = jpegxl_rs::utils::check_valid_signature(bytes) == Some(true);
+    let raster_format = image::guess_format(bytes).ok();
+    let mut details = ImageDetails {
+        format: None,
+        extensions: &[],
+        dimensions: None,
+        preview: None,
+        exif: Vec::new(),
+    };
+    let preview = if jxl {
+        details.format = Some(OutputFormat::JpegXl.name().into());
+        details.extensions = &["jxl"];
+        jxl_header::image_header(bytes, MAX_JPEG_XL_PIXELS)
+            .ok()
+            .and_then(|(dimensions, normalize)| {
+                details.dimensions = Some(dimensions);
+                decode_jxl(bytes, &parallel_runner(), normalize).ok()
+            })
+    } else if let Some(format) = raster_format {
+        details.format = Some(match format {
+            ImageFormat::Jpeg => "JPEG".into(),
+            ImageFormat::Png => "PNG".into(),
+            ImageFormat::WebP => "WebP".into(),
+            _ => format!("{format:?}"),
+        });
+        details.extensions = format.extensions_str();
+        details.dimensions = image::ImageReader::with_format(Cursor::new(bytes), format)
+            .into_dimensions()
+            .ok();
+        match raster::decode(bytes) {
+            Err(Error::Limits) if format == ImageFormat::Jpeg => raster::decode_large_jpeg(bytes).ok(),
+            result => result.ok(),
+        }
+    } else {
+        None
+    };
+    if let Some(image) = preview {
+        details.dimensions = Some(image.dimensions());
+        details.preview = Some(raster::limit_size(&image, 384).into_owned());
+    }
+
+    let reader = exif::Reader::new();
+    let metadata = if jxl {
+        jxl_header::exif(bytes).and_then(|raw| reader.read_raw(raw).ok())
+    } else {
+        reader.read_from_container(&mut Cursor::new(bytes)).ok()
+    };
+    if let Some(metadata) = metadata {
+        details.exif.extend(metadata.fields().map(|field| {
+            let value = field.display_value().with_unit(&metadata).to_string();
+            (field.tag.to_string(), value.chars().take(512).collect())
+        }));
+    }
+    Ok(details)
+}
+
 /// Optimize encoded input, including reversible JPEG-to-JPEG XL transcoding.
 /// Returns the original display dimensions and the selected output, if any.
 pub fn optimize_for_conversion(
@@ -844,6 +916,26 @@ fn decode_jxl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_details_read_exif_from_jpeg_and_report_its_signature() {
+        let tiff = b"II*\0\x08\0\0\0\x01\0\x0f\x01\x02\0\x04\0\0\0Cam\0\0\0\0\0";
+        let mut jpeg = b"\xff\xd8\xff\xe1".to_vec();
+        jpeg.extend_from_slice(&((tiff.len() as u16) + 8).to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(tiff);
+        jpeg.extend_from_slice(b"\xff\xd9");
+
+        let details = inspect_image(&jpeg).unwrap();
+        assert_eq!(details.format.as_deref(), Some("JPEG"));
+        assert!(details.extensions.contains(&"jpeg"));
+        assert!(
+            details
+                .exif
+                .iter()
+                .any(|(tag, value)| tag == "Make" && value.contains("Cam"))
+        );
+    }
 
     #[test]
     fn dimensions_are_available_from_a_png_header_without_image_data() {

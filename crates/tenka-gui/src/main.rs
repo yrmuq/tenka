@@ -3,6 +3,7 @@ mod comparison;
 mod estimate;
 mod file_drop;
 mod icons;
+mod image_info;
 mod jobs;
 mod language;
 mod summary;
@@ -36,6 +37,7 @@ use tenka_core::{OptimizationMode, Options, OutputFormat};
 use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
+const ACTION_GAP: f32 = 15.0;
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
 
 fn main() -> eframe::Result {
@@ -56,14 +58,14 @@ fn main() -> eframe::Result {
             .with_app_id("io.github.yrmuq.tenka")
             .with_icon(icon),
         window_builder: Some(Box::new(|window| {
-            // Start with the defaults until the main window preferences are loaded.
             window
                 .with_inner_size(MAIN_WINDOW_SIZE)
-                .with_min_inner_size(MAIN_WINDOW_SIZE)
-                .with_max_inner_size(MAIN_WINDOW_SIZE)
+                .with_min_inner_size(window_size::MIN_SIZE)
+                .with_resizable(true)
                 .with_maximized(false)
-                .with_maximize_button(false)
+                .with_fullscreen(false)
         })),
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native(
@@ -112,6 +114,7 @@ struct Tenka {
     system_theme: theme::SystemTheme,
     catalog: Catalog,
     about: about::About,
+    image_info: image_info::ImageInfo,
     window_size: WindowSize,
     queue: Vec<QueueEntry>,
     queue_jump: Option<usize>,
@@ -167,7 +170,8 @@ impl Tenka {
         Self {
             catalog: Catalog::new(&language),
             about: about::About::default(),
-            window_size: WindowSize::load(&context.egui_ctx, context.storage),
+            image_info: image_info::ImageInfo::default(),
+            window_size: WindowSize::new(),
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
@@ -206,9 +210,12 @@ impl Tenka {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
-                    if ui.button(self.label(109)).clicked() {
-                        self.open_comparison(&[]);
-                    }
+                    ui.menu_button(self.label(183), |ui| {
+                        if ui.button(self.label(109)).clicked() {
+                            ui.close();
+                            self.open_comparison(&[]);
+                        }
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::about(ui, self.label(153)).clicked() {
                             self.about.open();
@@ -493,7 +500,8 @@ impl Tenka {
                 } else {
                     ui.add_enabled(
                         pending > 0 && self.scans_pending == 0,
-                        Button::new(self.label(22)),
+                        Button::new(RichText::new(self.label(22)).color(egui::Color32::BLACK))
+                            .fill(egui::Color32::from_rgb(242, 143, 46)),
                     )
                 }
             })
@@ -526,6 +534,7 @@ impl Tenka {
             self.folder_request = None;
             ui.ctx().request_repaint();
         }
+        ui.add_space((actions.bottom() + ACTION_GAP - ui.next_widget_position().y).max(0.0));
         if let Some(error) = &self.folder_failure {
             self.show_error(ui, error);
         }
@@ -657,6 +666,7 @@ impl Tenka {
         const MIN_COLUMN_WIDTH: f32 = 100.0;
         const ROW_ACTION_SIZE: egui::Vec2 = egui::vec2(28.0, 28.0);
         const FOLDER_GAP: f32 = 6.0;
+        const INFO_GAP: f32 = 6.0;
 
         let content_height = HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32;
         let (bounds, _) = ui.allocate_exact_size(
@@ -697,6 +707,15 @@ impl Tenka {
                 ROW_ACTION_SIZE,
             )
         };
+        let info_rect = |cell: Rect| {
+            Rect::from_center_size(
+                egui::pos2(
+                    cell.left() + INFO_GAP + ROW_ACTION_SIZE.x * 0.5,
+                    cell.center().y,
+                ),
+                ROW_ACTION_SIZE,
+            )
+        };
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         let header = Rect::from_min_size(
             table.min,
@@ -713,6 +732,7 @@ impl Tenka {
         let mut remove = None;
         let mut compare = None;
         let mut reveal_path = None;
+        let mut info_path = None;
         let jump = self.queue_jump.take();
         let scroll_bounds = Rect::from_min_max(body.min, bounds.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(scroll_bounds), |ui| {
@@ -751,7 +771,15 @@ impl Tenka {
                                     .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
                             let [mut file, mut output, preview, delete] = column_rects(row);
+                            let input_info = info_rect(file);
+                            if ui
+                                .put(input_info, |ui: &mut Ui| icons::about(ui, self.label(184)))
+                                .clicked()
+                            {
+                                info_path = Some(entry.input.path.clone());
+                            }
                             let input_folder = folder_rect(file);
+                            file.min.x = input_info.right();
                             file.max.x = input_folder.left();
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
@@ -782,7 +810,17 @@ impl Tenka {
                                 _ => None,
                             };
                             let output_folder = folder_rect(output);
-                            if conversion.is_some() {
+                            if let Some(conversion) = conversion {
+                                let output_info = info_rect(output);
+                                if ui
+                                    .put(output_info, |ui: &mut Ui| {
+                                        icons::about(ui, self.label(184))
+                                    })
+                                    .clicked()
+                                {
+                                    info_path = Some(conversion.path.clone());
+                                }
+                                output.min.x = output_info.right();
                                 output.max.x = output_folder.left();
                             }
                             queue_cell(ui, output, |ui| {
@@ -859,6 +897,9 @@ impl Tenka {
         }
         if let Some(paths) = compare {
             self.open_comparison(&paths);
+        }
+        if let Some(path) = info_path {
+            self.image_info.open(path);
         }
         if let Some(path) = reveal_path {
             self.folder_failure = None;
@@ -1121,19 +1162,19 @@ impl eframe::App for Tenka {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(ui.style())
-                    .inner_margin(egui::Margin::symmetric(20, 15)),
+                    .inner_margin(egui::Margin::symmetric(20, ACTION_GAP as i8)),
             )
             .show(ui, |ui| self.show_convert(ui));
         self.show_completion(context);
         self.about
             .show(context, &self.catalog, &mut self.window_size);
+        self.image_info.show(context, &self.catalog);
         self.poll_comparison_windows(context);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("language", self.language.clone());
         storage.set_string("theme", theme_name(self.theme).into());
-        self.window_size.save(storage);
     }
 }
 
@@ -1325,10 +1366,10 @@ mod tests {
         render(click(logo));
         render(Vec::new());
         let settings = render(Vec::new());
-        for label in ["Window settings", "Width", "Height", "960", "650", "Reset"] {
+        for label in ["Window settings", "Width", "Height", "760", "620", "Reset"] {
             assert!(text_position(&settings, label).is_some(), "{label}");
         }
-        render(click(text_position(&settings, "960").unwrap()));
+        render(click(text_position(&settings, "760").unwrap()));
         render(Vec::new());
         render(vec![InputEvent::Text("1040".into())]);
         let resized = render(vec![InputEvent::Key {
@@ -1341,7 +1382,7 @@ mod tests {
         assert!(resized.viewport_output[&egui::ViewportId::ROOT]
             .commands
             .iter()
-            .any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(1040.0, 650.0))));
+            .any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(1040.0, 620.0))));
 
         let unlock = text_position(&render(Vec::new()), "Unlock window resizing").unwrap();
         let output = render(click(unlock));
@@ -1349,7 +1390,7 @@ mod tests {
             output.viewport_output[&egui::ViewportId::ROOT]
                 .commands
                 .iter()
-                .any(|command| matches!(command, egui::ViewportCommand::Resizable(true)))
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(false)))
         );
 
         let reset = text_position(&render(Vec::new()), "Reset").unwrap();
@@ -1358,9 +1399,20 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, egui::ViewportCommand::Resizable(false)))
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(true)))
         );
         assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == MAIN_WINDOW_SIZE)));
+
+        render(click(Pos2::new(10.0, 10.0)));
+        assert!(text_position(&render(Vec::new()), "Window settings").is_some());
+        render(vec![InputEvent::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(text_position(&render(Vec::new()), "About").is_some());
     }
 
     #[test]
