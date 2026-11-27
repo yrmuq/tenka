@@ -657,17 +657,15 @@ impl Tenka {
         } else {
             SPACING.x * 0.5
         };
-        let item_gap = ui.spacing().item_spacing.x;
+        let mut area = ui.available_rect_before_wrap();
+        area.min.x += inset;
         let mut row_dividers = Vec::with_capacity(4);
         let grid = ui
-            .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(inset);
+            .scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
                 egui::Grid::new("summary_totals")
                     .num_columns(2)
                     .spacing(SPACING)
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = item_gap;
                         let top = ui.cursor().top() - SPACING.y * 0.5;
                         ui.label(self.label(136));
                         let files = ui.horizontal(|ui| {
