@@ -183,7 +183,10 @@ fn show_details(
     if let Some(extension) = extension.as_deref()
         && let Some(image) = image
         && !image.extensions.is_empty()
-        && !image.extensions.iter().any(|known| extension.eq_ignore_ascii_case(known))
+        && !image
+            .extensions
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
     {
         ui.colored_label(ui.visuals().warn_fg_color, catalog.text(192));
     }

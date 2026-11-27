@@ -99,9 +99,7 @@ pub fn exif(bytes: &[u8]) -> Option<Vec<u8>> {
     const MAX_EXIF_BYTES: usize = 2 * 1024 * 1024;
     let mut buffer = Vec::new();
     // SAFETY: the decoder is dropped before its input and optional box buffer.
-    let decoder = HeaderDecoder(NonNull::new(unsafe {
-        JxlDecoderCreate(std::ptr::null())
-    })?);
+    let decoder = HeaderDecoder(NonNull::new(unsafe { JxlDecoderCreate(std::ptr::null()) })?);
     let ptr = decoder.0.as_ptr();
     // SAFETY: the input remains valid and the output buffer is never resized
     // while libjxl owns it.

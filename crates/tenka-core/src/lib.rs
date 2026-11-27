@@ -302,7 +302,9 @@ pub fn inspect_image(bytes: &[u8]) -> Result<ImageDetails> {
             .into_dimensions()
             .ok();
         match raster::decode(bytes) {
-            Err(Error::Limits) if format == ImageFormat::Jpeg => raster::decode_large_jpeg(bytes).ok(),
+            Err(Error::Limits) if format == ImageFormat::Jpeg => {
+                raster::decode_large_jpeg(bytes).ok()
+            }
             result => result.ok(),
         }
     } else {

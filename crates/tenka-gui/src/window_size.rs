@@ -58,11 +58,7 @@ impl WindowSize {
     fn apply(&mut self, context: &Context) {
         let Settings { resizable, .. } = self.settings;
         let size = self.settings.size();
-        let minimum = if resizable {
-            MIN_SIZE
-        } else {
-            size
-        };
+        let minimum = if resizable { MIN_SIZE } else { size };
         let maximum = if resizable {
             egui::Vec2::INFINITY
         } else {
@@ -167,8 +163,7 @@ impl WindowSize {
         dialog.response.should_close()
             || (dialog.is_top_modal
                 && !dialog.any_popup_open
-                && context.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                }))
+                && context
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
     }
 }
