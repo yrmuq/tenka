@@ -8,9 +8,9 @@ repository.workspace = true
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 imagesize = { version = "0.15", default-features = false, features = ["jpeg", "png", "webp"] }
-jpegxl-rs = { version = "0.15", features = ["vendored"] }
+jpegxl-rs = { version = "0.16", features = ["vendored"] }
 jpegxl-sys = "0.13"
 ssimulacra2 = "0.5.1"
 webp = { version = "0.3.1", default-features = false }
 thiserror = "2"
-moxcms = "0.8"
+moxcms = "0.9"
