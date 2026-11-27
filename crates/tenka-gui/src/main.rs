@@ -2035,7 +2035,9 @@ mod tests {
             .iter()
             .find_map(|shape| match shape.shape {
                 Shape::LineSegment { points: [a, b], .. }
-                    if a.y == b.y && a.y > table.bottom() && a.y < button.top()
+                    if a.y == b.y
+                        && a.y > table.bottom()
+                        && a.y < button.top()
                         && b.x - a.x > 300.0 =>
                 {
                     Some(a.y)
