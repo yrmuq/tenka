@@ -611,10 +611,12 @@ impl Tenka {
         let response = egui::Modal::new(id).frame(frame).show(context, |ui| {
             ui.set_width(360.0);
             let header_x = ui.available_rect_before_wrap().x_range();
-            let header = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::close(ui, self.label(142)).clicked() {
-                    ui.close_kind(egui::UiKind::Modal);
-                }
+            let header = ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::close(ui, self.label(142)).clicked() {
+                        ui.close_kind(egui::UiKind::Modal);
+                    }
+                });
             });
             let title = egui::Label::new(RichText::new(self.label(135)).heading());
             let title_area =
