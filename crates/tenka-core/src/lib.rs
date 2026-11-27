@@ -746,7 +746,7 @@ fn encode_reversible_jpeg(bytes: &[u8], dimensions: (u32, u32)) -> Result<Output
         .and_then(|mut encoder| encoder.encode_jpeg(bytes))
         .map_err(Error::JxlTranscode)?;
     Ok(Output {
-        bytes: encoded.data,
+        bytes: encoded,
         dimensions,
         quality: 100.0,
         setting: Setting::JxlReversible,
@@ -771,10 +771,10 @@ fn encode_jxl(
         })
         .maybe_parallel_runner(runner.as_ref().map(|runner| runner as &dyn ParallelRunner));
     let frame = EncoderFrame::new(image.as_raw()).num_channels(4);
-    let encoded = builder
+    builder
         .build()?
-        .encode_frame::<u8, u8>(&frame, image.width(), image.height())?;
-    Ok(encoded.data)
+        .encode_frame::<u8>(&frame, image.width(), image.height())
+        .map_err(Error::JxlEncode)
 }
 
 fn encode_webp(image: &RgbaImage, quality: Option<f32>) -> Result<Vec<u8>> {
