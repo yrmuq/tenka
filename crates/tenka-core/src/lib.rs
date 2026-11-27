@@ -25,7 +25,6 @@ const MAX_PIXELS: u64 = 36_000_000;
 const MAX_JPEG_XL_PIXELS: u64 = 80_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
-const PERCEPTUAL_QUALITY: f64 = 80.0;
 const BLOCK_ERROR_PER_POINT: f64 = 0.4;
 const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
@@ -118,7 +117,10 @@ impl OutputFormat {
             Self::JpegXl => ([0.4, 0.75, 1.25, 2.0, 3.0], [4.0, 5.0], Setting::Jxl),
             Self::Webp => ([98.0, 94.0, 82.0, 70.0, 55.0], [45.0, 35.0], Setting::Webp),
         };
-        let mut settings = Vec::with_capacity(if detailed { 11 } else { 5 });
+        let mut settings = Vec::with_capacity(if detailed { 13 } else { 5 });
+        if detailed && self == Self::JpegXl {
+            settings.extend([Setting::Jxl(0.15), Setting::Jxl(0.25)]);
+        }
         for (index, value) in values.into_iter().enumerate() {
             if detailed && index > 0 {
                 settings.push(setting(f32::midpoint(values[index - 1], value)));
@@ -386,11 +388,7 @@ impl Source {
     ) -> Result<Option<Output>> {
         let detailed = mode != OptimizationMode::Best;
         let mut search = Search {
-            min_quality: if detailed {
-                PERCEPTUAL_QUALITY
-            } else {
-                f64::from(DEFAULT_QUALITY)
-            },
+            min_quality: f64::from(DEFAULT_QUALITY),
             max_bytes: usize::MAX,
             detailed,
             exhaustive: false,
@@ -514,11 +512,7 @@ impl Source {
     ) -> Result<()> {
         search.check_cancelled()?;
         let lossless = options.format.lossless_setting();
-        let mut lossy = options.format.compression_settings(search.detailed);
-        let (width, height) = self.dimensions();
-        if search.detailed && raster::check_dimensions(width, height).is_err() {
-            lossy.splice(..0, [Setting::Jxl(0.15), Setting::Jxl(0.25)]);
-        }
+        let lossy = options.format.compression_settings(search.detailed);
         let reference = raster::QualityReference::new(&self.0);
         probe_compression(&self.0, &reference, search, &lossy, runner, &mut visit)?;
 
@@ -879,6 +873,29 @@ mod tests {
         let cheap = economical_candidate(&candidates, OptimizationMode::Cheap).unwrap();
         assert_eq!((balance.quality, balance.bytes), (92.0, 512));
         assert_eq!((cheap.quality, cheap.bytes), (80.0, 256));
+    }
+
+    #[test]
+    fn cheap_keeps_subtle_texture_while_saving_space() {
+        let source = Source(RgbaImage::from_fn(256, 192, |x, y| {
+            let grain = (((x * 13) ^ (y * 37) ^ (x * y)) % 6) as u8;
+            image::Rgba([
+                28 + (x / 4) as u8 + grain,
+                45 + (y / 4) as u8 + grain,
+                75 + ((x + y) / 5) as u8 + grain,
+                255,
+            ])
+        }));
+        let options = Options::default();
+        let lossless = source.convert_with_quality(options, 100).unwrap();
+        let output = source
+            .optimize_with_mode(options, lossless.bytes.len() + 1, OptimizationMode::Cheap)
+            .unwrap()
+            .unwrap();
+
+        assert!(output.quality >= f64::from(DEFAULT_QUALITY));
+        assert!(output.bytes.len() < lossless.bytes.len());
+        assert_eq!(output.dimensions, source.dimensions());
     }
 
     #[test]

@@ -46,7 +46,7 @@ On Wayland, use **+** to add files or folders in either window.
 | Select the red cross on a row | Remove that entry from the conversion queue. |
 | Select the split circle on a completed row | Compare the original on the left with the converted image on the right. |
 | Drag the divider between **File** and **Output** | Resize both columns. |
-| Select a folder icon beside **File** or **Output** | Open the containing folder with the original or converted file selected. The **Output** size context menu also reveals the converted file. |
+| Select a folder icon in **File** or **Output** | Open the containing folder with the original or converted file selected. The **Output** size context menu also reveals the converted file. |
 | Select **Compare** | Drop files into the comparison window or select **+**. Press **Mode** to switch between a shared split view and separate side-by-side images. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |

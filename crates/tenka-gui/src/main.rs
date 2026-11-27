@@ -673,29 +673,27 @@ impl Tenka {
         if scrolls {
             table.max.x -= scroll_style.allocated_width();
         }
-        let action_width = (table.width() * 0.1).max(3.0 * ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP);
+        let action_width = (table.width() * 0.1).max(2.0 * ROW_ACTION_SIZE.x);
         let output_end = table.width() - action_width;
         let min_width = MIN_COLUMN_WIDTH.min(output_end * 0.5);
         let file_width =
             (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
         let split = table.left() + file_width;
         let output_end_x = table.left() + output_end;
-        let output_start = split + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
-        let preview_start = output_end_x + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
-        let preview_end = (preview_start + table.right()) * 0.5;
+        let preview_end = (output_end_x + table.right()) * 0.5;
         let column_rects = |row: Rect| {
             [
                 Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
-                Rect::from_x_y_ranges(output_start..=output_end_x, row.y_range()),
-                Rect::from_x_y_ranges(preview_start..=preview_end, row.y_range()),
+                Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
+                Rect::from_x_y_ranges(output_end_x..=preview_end, row.y_range()),
                 Rect::from_x_y_ranges(preview_end..=table.right(), row.y_range()),
             ]
         };
-        let folder_rect = |boundary: f32, row: Rect| {
+        let folder_rect = |cell: Rect| {
             Rect::from_center_size(
                 egui::pos2(
-                    boundary + FOLDER_GAP + ROW_ACTION_SIZE.x * 0.5,
-                    row.center().y,
+                    cell.right() - FOLDER_GAP - ROW_ACTION_SIZE.x * 0.5,
+                    cell.center().y,
                 ),
                 ROW_ACTION_SIZE,
             )
@@ -753,7 +751,9 @@ impl Tenka {
                                 ui.painter()
                                     .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
-                            let [file, output, preview, delete] = column_rects(row);
+                            let [mut file, mut output, preview, delete] = column_rects(row);
+                            let input_folder = folder_rect(file);
+                            file.max.x = input_folder.left();
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
                                     ui.add(
@@ -771,23 +771,27 @@ impl Tenka {
                                 }
                             });
                             if ui
-                                .put(folder_rect(split, row), |ui: &mut Ui| {
+                                .put(input_folder, |ui: &mut Ui| {
                                     icons::reveal_file(ui, self.label(134))
                                 })
                                 .clicked()
                             {
                                 reveal_path = Some(entry.input.path.clone());
                             }
-                            queue_cell(ui, output, |ui| {
-                                self.show_output(ui, &entry.status, &mut reveal_path);
-                            });
                             let conversion = match &entry.status {
                                 Status::Done(Ok(Some(result))) => Some(result),
                                 _ => None,
                             };
+                            let output_folder = folder_rect(output);
+                            if conversion.is_some() {
+                                output.max.x = output_folder.left();
+                            }
+                            queue_cell(ui, output, |ui| {
+                                self.show_output(ui, &entry.status, &mut reveal_path);
+                            });
                             if let Some(conversion) = conversion
                                 && ui
-                                    .put(folder_rect(output_end_x, row), |ui: &mut Ui| {
+                                    .put(output_folder, |ui: &mut Ui| {
                                         icons::reveal_file(ui, self.label(70))
                                     })
                                     .clicked()
@@ -1379,6 +1383,51 @@ mod tests {
         }
         assert_eq!(app.queue.len(), 1);
         assert_eq!(app.queue[0].input.path, input);
+    }
+
+    #[test]
+    fn queue_folder_icons_are_inside_the_file_and_output_columns() {
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.queue.push(QueueEntry {
+            input: InputFile::from(PathBuf::from("source.jpg")),
+            size: Arc::new(OnceLock::new()),
+            status: Status::Done(Ok(Some(Conversion {
+                path: PathBuf::from("source.jxl"),
+                source_bytes: 2048,
+                bytes: 1024,
+            }))),
+        });
+        let rendered = render_ui(
+            &ctx,
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                ..Default::default()
+            },
+            |ui| app.show_queue(ui, false),
+        );
+        let mut folders = Vec::new();
+        let mut dividers = Vec::new();
+        for shape in &rendered.shapes {
+            match &shape.shape {
+                Shape::Path(path) if path.closed && path.points.len() == 6 => {
+                    folders.push(Rect::from_points(&path.points));
+                }
+                Shape::LineSegment { points: [a, b], .. }
+                    if a.x == b.x && (a.y - b.y).abs() >= 40.0 =>
+                {
+                    dividers.push(a.x);
+                }
+                _ => {}
+            }
+        }
+        folders.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        dividers.sort_by(f32::total_cmp);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(dividers.len(), 3);
+        assert!(folders[0].right() < dividers[0]);
+        assert!(folders[1].left() > dividers[0]);
+        assert!(folders[1].right() < dividers[1]);
     }
 
     #[test]
