@@ -8,7 +8,7 @@
 ---
 
 > [!NOTE]
-> Development builds may contain bugs or change behavior between updates.
+> Tenka is under active development. Behavior may change, bugs may occur, and saved settings may become outdated.
 
 ---
 
@@ -74,6 +74,7 @@ The footer estimates the time remaining from the latest ten completed files, usi
 | Format | x86_64 | arm64 |
 | --- | --- | --- |
 | AppImage | ✅ | ❌ |
+| Flatpak | ❌ | ❌ |
 
 ### Release scheme
 
@@ -84,6 +85,10 @@ Stable versions follow `X.Y.0`. Versions `X.Y.Z` with `Z > 0` are automatic depe
 Download the x86_64 `.AppImage` from the [stable download page](https://github.com/yrmuq/tenka/releases/latest) or try an [AppImage development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). AppImages built from this branch use Ubuntu 24.04 LTS and bundle the XKB libraries for X11. File dialogs use the Linux desktop portal.
 
 [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) can install and integrate the stable AppImage and apply supported updates. Import the `.AppImage` in Gear Lever. The stable AppImage embeds update metadata, and its companion `.zsync` enables delta updates for compatible tools.
+
+### Flatpak
+
+Flatpak packaging is planned.
 
 ---
 
