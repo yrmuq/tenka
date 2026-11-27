@@ -15,8 +15,8 @@
 Tenka is a Linux desktop image converter for JPEG XL and WebP. It uses an egui interface on Wayland and X11 and a separate Rust library to choose compression settings based on file size and visual similarity.
 
 <!--
-Replace SCREENSHOT_PATH with the uploaded screenshot path and uncomment the image.
-![Tenka screenshot](SCREENSHOT_PATH)
+Upload the screenshot to assets/screenshot.webp and uncomment the image.
+![Tenka screenshot](assets/screenshot.webp)
 -->
 
 ---
