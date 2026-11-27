@@ -17,7 +17,7 @@
 - `crates/tenka-gui/src/window_icon.rs` provides desktop icon metadata for standalone AppImages on Wayland.
 - `crates/tenka-gui/src/icons.rs` draws the language, appearance, and comparison buttons.
 - `crates/tenka-gui/src/file_drop.rs` reads dropped file paths from egui for both windows.
-- `packaging/` builds the AppImage and stable update metadata. The shared build action tests the workspace and starts the AppImage on X11 and Wayland.
+- `packaging/` builds the AppImage with its X11 keyboard libraries and stable update metadata. The shared build action tests the workspace and starts the AppImage on X11 and Wayland.
 - `.github/workflows/dev.yml` updates the development draft. `.github/workflows/release.yml` publishes stable AppImages and syncs the version to dev.
 - `.github/dependabot.yml` and the deps and pins workflows group updates on deps and publish verified dependency prereleases.
 - The Dependabot queue and checks workflows test the current PR merge snapshot before merging it into deps and removing the bot branch.

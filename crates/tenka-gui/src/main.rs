@@ -44,7 +44,7 @@ const ACTION_GAP: f32 = 15.0;
 const DROP_AREA_SIDE_MARGIN: i8 = 20;
 const SELECTOR_WIDTH: f32 = 96.0;
 const APP_ID: &str = "io.github.yrmuq.tenka";
-const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
+const APP_ICON: &[u8] = include_bytes!("../../../assets/io.github.yrmuq.tenka.png");
 
 fn app_title(uppercase: bool) -> &'static str {
     if uppercase { "TENKA" } else { "Tenka" }

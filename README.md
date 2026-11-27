@@ -1,5 +1,5 @@
 <div align="center">
-<img src="packaging/io.github.yrmuq.tenka.png" width="112" alt="Tenka logo">
+<img src="assets/logo.webp" width="112" alt="Tenka logo">
 
 # Tenka
 
@@ -81,7 +81,7 @@ Stable versions follow `X.Y.0`. Versions `X.Y.Z` with `Z > 0` are automatic depe
 
 ### AppImage
 
-Download the x86_64 `.AppImage` from the [stable download page](https://github.com/yrmuq/tenka/releases/latest) or try an [AppImage development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). AppImages are built on Ubuntu 24.04 LTS. File dialogs use the Linux desktop portal. X11 sessions require the system `libxkbcommon-x11` library.
+Download the x86_64 `.AppImage` from the [stable download page](https://github.com/yrmuq/tenka/releases/latest) or try an [AppImage development build](https://github.com/yrmuq/tenka/actions/workflows/dev.yml). AppImages built from this branch use Ubuntu 24.04 LTS and bundle the XKB libraries for X11. File dialogs use the Linux desktop portal.
 
 [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) can install and integrate the stable AppImage and apply supported updates. Import the `.AppImage` in Gear Lever. The stable AppImage embeds update metadata, and its companion `.zsync` enables delta updates for compatible tools.
 
