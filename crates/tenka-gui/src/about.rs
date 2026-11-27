@@ -16,6 +16,48 @@ use crate::{
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const LICENSE: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/LICENSE");
+const LOGO_SIZE: egui::Vec2 = egui::vec2(88.0, 88.0);
+const COLUMN_SPACING: f32 = 18.0;
+const MIN_COLUMN_WIDTH: f32 = 120.0;
+
+#[derive(Clone, Copy, Default)]
+struct TableLayout {
+    width: f32,
+    upstream: f32,
+}
+
+struct Logo {
+    texture: TextureHandle,
+    anchor: egui::Vec2,
+}
+
+impl Logo {
+    fn load(context: &Context) -> Self {
+        let icon = eframe::icon_data::from_png_bytes(APP_ICON)
+            .expect("the embedded Tenka icon is valid PNG");
+        let size = [icon.width as usize, icon.height as usize];
+        let pixels = ColorImage::from_rgba_unmultiplied(size, &icon.rgba);
+        let mut visible = egui::Rect::NOTHING;
+        for (index, pixel) in pixels.pixels.iter().enumerate() {
+            if pixel.a() > 0 {
+                visible = visible.union(egui::Rect::from_min_size(
+                    egui::pos2((index % size[0]) as f32, (index / size[0]) as f32),
+                    egui::Vec2::splat(1.0),
+                ));
+            }
+        }
+        let scale = LOGO_SIZE / egui::vec2(icon.width as f32, icon.height as f32);
+        let anchor = if visible.is_positive() {
+            egui::vec2(visible.left(), visible.center().y) * scale
+        } else {
+            egui::vec2(0.0, LOGO_SIZE.y * 0.5)
+        };
+        Self {
+            texture: context.load_texture("tenka_logo", pixels, TextureOptions::LINEAR),
+            anchor,
+        }
+    }
+}
 
 #[derive(Default)]
 struct LogoTaps {
@@ -46,7 +88,8 @@ pub struct About {
     open: bool,
     window_settings_open: bool,
     logo_taps: LogoTaps,
-    logo: Option<TextureHandle>,
+    logo: Option<Logo>,
+    table_layout: TableLayout,
     request: Option<Receiver<Result<ReleaseStatus, Failure>>>,
     status: Option<Result<ReleaseStatus, Failure>>,
 }
@@ -82,16 +125,9 @@ impl About {
             return;
         }
 
-        let logo = self.logo.get_or_insert_with(|| {
-            let icon = eframe::icon_data::from_png_bytes(APP_ICON)
-                .expect("the embedded Tenka icon is valid PNG");
-            let pixels = ColorImage::from_rgba_unmultiplied(
-                [icon.width as usize, icon.height as usize],
-                &icon.rgba,
-            );
-            context.load_texture("tenka_logo", pixels, TextureOptions::LINEAR)
-        });
+        let logo = self.logo.get_or_insert_with(|| Logo::load(context));
         let checking = self.request.is_some();
+        let layout = self.table_layout;
         let response = egui::Modal::new(egui::Id::unique("about_tenka")).show(context, |ui| {
             ui.set_width(688.0);
             ui.horizontal(|ui| {
@@ -103,41 +139,62 @@ impl About {
                 });
             });
             ui.add_space(12.0);
-            let mut check_for_updates = false;
-            let mut logo_clicked = false;
-            ui.columns(2, |columns| {
-                columns[0].vertical_centered(|ui| {
-                    logo_clicked = ui
-                        .add(
-                            egui::Image::new(&*logo)
-                                .fit_to_exact_size(egui::vec2(88.0, 88.0))
-                                .sense(egui::Sense::click()),
-                        )
-                        .clicked();
-                    ui.heading("Tenka");
-                });
-                columns[1].horizontal(|ui| {
-                    ui.label(catalog.text(154));
-                    ui.hyperlink_to("GitHub", REPOSITORY);
-                });
-                columns[1].horizontal(|ui| {
-                    ui.label(catalog.text(155));
-                    ui.hyperlink_to(env!("CARGO_PKG_LICENSE"), LICENSE);
-                });
-                columns[1].horizontal(|ui| {
-                    ui.label(catalog.text(156));
-                    ui.label(env!("CARGO_PKG_VERSION"));
-                    check_for_updates = ui
-                        .add_enabled(!checking, egui::Button::new(catalog.text(157)))
-                        .clicked();
-                });
-                show_update_status(&mut columns[1], catalog, checking, self.status.as_ref());
-            });
+            let area = ui.available_rect_before_wrap();
+            let inset = if layout.width > 0.0 {
+                ((area.width() - layout.width) * 0.5).max(0.0)
+            } else {
+                0.0
+            };
+            let table_left = area.left() + inset;
+            let upstream = layout.upstream.max(MIN_COLUMN_WIDTH + COLUMN_SPACING);
+            let project_area =
+                egui::Rect::from_min_max(egui::pos2(table_left + upstream, area.top()), area.max);
+            let (check_for_updates, license_y) = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(project_area), |ui| {
+                    let title_size = egui::TextStyle::Heading.resolve(ui.style()).size * 2.0;
+                    ui.heading(egui::RichText::new("Tenka").size(title_size));
+                    ui.horizontal(|ui| {
+                        ui.label(catalog.text(154));
+                        ui.hyperlink_to("GitHub", REPOSITORY);
+                    });
+                    let license = ui.horizontal(|ui| {
+                        ui.label(catalog.text(155));
+                        ui.hyperlink_to(env!("CARGO_PKG_LICENSE"), LICENSE);
+                    });
+                    let check = ui.horizontal(|ui| {
+                        ui.label(catalog.text(156));
+                        ui.label(env!("CARGO_PKG_VERSION"));
+                        ui.add_enabled(!checking, egui::Button::new(catalog.text(157)))
+                            .clicked()
+                    });
+                    show_update_status(ui, catalog, checking, self.status.as_ref());
+                    (check.inner, license.response.rect.center().y)
+                })
+                .inner;
+            // The striped rows extend two points beyond the first column.
+            let logo_rect = egui::Rect::from_min_size(
+                egui::pos2(table_left - 2.0, license_y) - logo.anchor,
+                LOGO_SIZE,
+            );
+            let logo_clicked = ui
+                .put(
+                    logo_rect,
+                    egui::Image::new(&logo.texture)
+                        .fit_to_exact_size(LOGO_SIZE)
+                        .sense(egui::Sense::click()),
+                )
+                .clicked();
             ui.add_space(18.0);
-            show_components(ui, catalog);
-            (check_for_updates, logo_clicked)
+            let measured = show_components(ui, catalog, inset);
+            (check_for_updates, logo_clicked, measured)
         });
-        let (check_for_updates, logo_clicked) = response.inner;
+        let (check_for_updates, logo_clicked, measured) = response.inner;
+        if (layout.width - measured.width).abs() > 0.5
+            || (layout.upstream - measured.upstream).abs() > 0.5
+        {
+            self.table_layout = measured;
+            context.request_repaint();
+        }
         if check_for_updates {
             self.request = Some(updates::start(context));
         }
@@ -216,29 +273,20 @@ fn components() -> &'static [Component] {
     })
 }
 
-fn show_components(ui: &mut Ui, catalog: &Catalog) {
-    let width_id = ui.make_persistent_id("about_components_width");
-    let width = ui
-        .data(|data| data.get_temp::<f32>(width_id))
-        .unwrap_or(0.0);
-    let inset = if width > 0.0 {
-        ((ui.available_width() - width) * 0.5).max(0.0)
-    } else {
-        0.0
-    };
+fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
     let grid = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(inset);
         egui::Grid::new("about_components")
             .num_columns(3)
-            .min_col_width(120.0)
+            .min_col_width(MIN_COLUMN_WIDTH)
             .max_col_width(350.0)
-            .spacing(egui::vec2(18.0, 9.0))
+            .spacing(egui::vec2(COLUMN_SPACING, 9.0))
             .striped(true)
             .show(ui, |ui| {
-                for id in [166, 167, 168] {
-                    ui.strong(catalog.text(id));
-                }
+                let first = ui.strong(catalog.text(166));
+                let upstream = ui.strong(catalog.text(167));
+                ui.strong(catalog.text(168));
                 ui.end_row();
                 for component in components() {
                     ui.label(component.name);
@@ -246,12 +294,12 @@ fn show_components(ui: &mut Ui, catalog: &Catalog) {
                     ui.label(catalog.translate(component.details));
                     ui.end_row();
                 }
+                upstream.rect.left() - first.rect.left()
             })
     });
-    let measured_width = grid.inner.response.rect.width();
-    if (width - measured_width).abs() > 0.5 {
-        ui.data_mut(|data| data.insert_temp(width_id, measured_width));
-        ui.ctx().request_repaint();
+    TableLayout {
+        width: grid.inner.response.rect.width(),
+        upstream: grid.inner.inner,
     }
 }
 
@@ -274,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn the_attribution_table_is_centered_in_about() {
+    fn the_logo_and_project_details_align_with_the_centered_table() {
         let context = Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, crate::MAIN_WINDOW_SIZE);
         let catalog = Catalog::new("en");
@@ -311,5 +359,29 @@ mod tests {
             (stripe.center().x - screen.center().x).abs() <= 1.0,
             "{stripe:?}"
         );
+        let logo = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect),
+                _ => None,
+            })
+            .unwrap();
+        let text_rect = |label| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let logo_anchor = logo.min + about.logo.as_ref().unwrap().anchor;
+        assert!((logo_anchor.x - stripe.left()).abs() <= 1.0);
+        assert!((text_rect("Tenka").left() - text_rect("Upstream").left()).abs() <= 1.0);
+        assert!((text_rect("License").center().y - logo_anchor.y).abs() <= 1.0);
     }
 }

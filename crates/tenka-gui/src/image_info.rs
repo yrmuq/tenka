@@ -28,6 +28,8 @@ pub struct ImageInfo {
     pending: Option<(PathBuf, Receiver<DetailsResult>)>,
     details: Option<DetailsResult>,
     preview: Option<TextureHandle>,
+    viewer_request: Option<Receiver<Result<(), Failure>>>,
+    viewer_failure: Option<Failure>,
 }
 
 impl ImageInfo {
@@ -35,6 +37,8 @@ impl ImageInfo {
         self.path = Some(path);
         self.details = None;
         self.preview = None;
+        self.viewer_request = None;
+        self.viewer_failure = None;
     }
 
     fn poll(&mut self, context: &Context) {
@@ -68,6 +72,20 @@ impl ImageInfo {
 
     pub fn show(&mut self, context: &Context, catalog: &Catalog) {
         self.poll(context);
+        if let Some(request) = &self.viewer_request {
+            let result = match request.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(Failure {
+                    label: 200,
+                    detail: String::new(),
+                })),
+            };
+            if let Some(result) = result {
+                self.viewer_failure = result.err();
+                self.viewer_request = None;
+            }
+        }
         let Some(path) = self.path.as_deref() else {
             return;
         };
@@ -87,9 +105,10 @@ impl ImageInfo {
                     }
                 });
             });
+            let mut open_viewer = false;
             match &self.details {
                 Some(Ok(details)) => {
-                    show_properties(
+                    open_viewer = show_properties(
                         ui,
                         catalog,
                         path,
@@ -97,6 +116,9 @@ impl ImageInfo {
                         self.preview.as_ref(),
                         (available_height - 265.0).clamp(60.0, 225.0),
                     );
+                    if let Some(error) = &self.viewer_failure {
+                        show_error(ui, catalog, error);
+                    }
                     ui.separator();
                     let exif_height =
                         (available_height - (ui.next_widget_position().y - top) - 30.0).max(48.0);
@@ -118,11 +140,18 @@ impl ImageInfo {
                     });
                 }
             }
+            open_viewer
         });
+        if dialog.inner {
+            self.viewer_request = Some(jobs::open_image(context, path.to_owned()));
+            self.viewer_failure = None;
+        }
         if dialog.should_close() {
             self.path = None;
             self.details = None;
             self.preview = None;
+            self.viewer_request = None;
+            self.viewer_failure = None;
         }
     }
 }
@@ -159,18 +188,25 @@ fn show_properties(
     details: &FileDetails,
     preview: Option<&TextureHandle>,
     preview_height: f32,
-) {
-    ui.vertical_centered(|ui| {
-        if let Some(preview) = preview {
-            ui.add(
-                egui::Image::new(preview)
-                    .max_height(preview_height)
-                    .max_width(410.0),
-            );
-        } else {
-            ui.weak(catalog.text(193));
-        }
-    });
+) -> bool {
+    let open_viewer = ui
+        .vertical_centered(|ui| {
+            if let Some(preview) = preview {
+                ui.add(
+                    egui::Image::new(preview)
+                        .max_height(preview_height)
+                        .max_width(410.0)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(catalog.text(199))
+                .double_clicked()
+            } else {
+                ui.weak(catalog.text(193));
+                false
+            }
+        })
+        .inner;
     ui.separator();
 
     let extension = path.extension().map(|value| value.to_string_lossy());
@@ -216,6 +252,7 @@ fn show_properties(
     if let Err(error) = &details.image {
         show_error(ui, catalog, error);
     }
+    open_viewer
 }
 
 fn show_exif(ui: &mut Ui, catalog: &Catalog, image: Option<&ImageDetails>) {
@@ -264,6 +301,55 @@ fn show_error(ui: &mut Ui, catalog: &Catalog, error: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_the_image_requires_a_double_click_on_the_preview() {
+        let context = Context::default();
+        let catalog = Catalog::new("en");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let details = FileDetails {
+            metadata: file.as_file().metadata().unwrap(),
+            image: Ok(ImageDetails {
+                format: Some("PNG".into()),
+                extensions: &["png"],
+                dimensions: Some((128, 128)),
+                preview: None,
+                exif: Vec::new(),
+            }),
+        };
+        let preview = context.load_texture(
+            "test_double_click",
+            ColorImage::filled([128, 128], egui::Color32::WHITE),
+            TextureOptions::LINEAR,
+        );
+        let render = |time, events| {
+            let mut open = false;
+            let output = crate::tests::render_ui(
+                &context,
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    open =
+                        show_properties(ui, &catalog, file.path(), &details, Some(&preview), 128.0);
+                },
+            );
+            (open, output)
+        };
+        let (_, output) = render(0.0, Vec::new());
+        let preview_center = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect.center()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!render(0.1, crate::tests::click(preview_center)).0);
+        assert!(render(0.2, crate::tests::click(preview_center)).0);
+    }
 
     #[test]
     fn preview_and_last_file_date_are_visible_before_expanding_exif() {

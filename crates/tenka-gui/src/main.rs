@@ -1304,7 +1304,7 @@ mod tests {
     use super::*;
     use egui::{Event as InputEvent, FullOutput, Modifiers, PointerButton, Pos2, RawInput, Shape};
 
-    fn click(pos: Pos2) -> Vec<InputEvent> {
+    pub(super) fn click(pos: Pos2) -> Vec<InputEvent> {
         let button = |pressed| InputEvent::PointerButton {
             pos,
             button: PointerButton::Primary,
@@ -1389,6 +1389,9 @@ mod tests {
             .unwrap();
         assert!(info.x > text_position(&main, "A").unwrap().x);
         render(click(info));
+        for _ in 0..3 {
+            render(Vec::new());
+        }
         let about = render(Vec::new());
         for label in [
             "About",

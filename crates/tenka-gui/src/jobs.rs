@@ -224,23 +224,47 @@ pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
 }
 
 pub fn reveal_file(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
-    file_manager_request(context, path, "ShowItems", 133)
+    desktop_request(context, path, 133, |path| {
+        show_in_file_manager(path, "ShowItems")
+    })
 }
 
 pub fn open_folder(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
-    file_manager_request(context, path, "ShowFolders", 71)
+    desktop_request(context, path, 71, |path| {
+        show_in_file_manager(path, "ShowFolders")
+    })
 }
 
-fn file_manager_request(
+pub fn open_image(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
+    desktop_request(context, path, 200, |path| {
+        use std::process::{Command, Stdio};
+
+        let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+        let status = Command::new("xdg-open")
+            .arg(absolute)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(status.to_string())
+        }
+    })
+}
+
+fn desktop_request(
     context: &Context,
     path: PathBuf,
-    method: &'static str,
     label: u16,
+    open: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
 ) -> Receiver<Result<(), Failure>> {
     let context = context.clone();
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = show_in_file_manager(&path, method).map_err(|detail| Failure {
+        let result = open(&path).map_err(|detail| Failure {
             label,
             detail: format!("{}\n{detail}", path.display()),
         });

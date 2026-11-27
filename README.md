@@ -48,6 +48,7 @@ On Wayland, use **+** to import images. The main window also lets you import fol
 | Drag the divider between **File** and **Output** | Resize both columns. |
 | Select a folder icon in **File** or **Output** | Open the containing folder with the original or converted file selected. The **Output** size context menu also reveals the converted file. |
 | Select the information icon in **File** or **Output** | View the preview and file properties. Expand **EXIF data** to inspect the tags. |
+| Double-click an image preview in its details | Open the file in the default image viewer. |
 | Select **Tools → Compare** | Drop files into the comparison window or select **+**. Press **Mode** to switch between a shared split view and separate side-by-side images. Scroll to zoom at the pointer and drag with the left mouse button to pan together. |
 | Select the globe | Toggle between the system language and English. |
 | Select the T-shirt | Cycle through system appearance, light, and dark. The shirt shows an **A** in system mode. |
