@@ -1,6 +1,7 @@
 use std::{
+    io::{self, Read},
     path::PathBuf,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::mpsc::{self, Receiver, TryRecvError},
 };
 
 use eframe::egui::{
@@ -10,7 +11,7 @@ use eframe::egui::{
 };
 
 use crate::{
-    ADD_IMAGES_SIZE, add_images_button, empty_drop_area,
+    ADD_IMAGES_SIZE, DROP_AREA_SIDE_MARGIN, add_images_button, app_title, empty_drop_area,
     file_drop::take_dropped_paths,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
@@ -19,6 +20,33 @@ use crate::{
     theme::SystemTheme,
 };
 
+pub const TITLE_CASE_ENV: &str = "TENKA_COMPARE_UPPERCASE_TITLE";
+
+pub fn title_case_code(uppercase: bool) -> &'static str {
+    if uppercase { "1" } else { "0" }
+}
+
+fn window_title(catalog: &Catalog, uppercase: bool) -> String {
+    format!("{} — {}", app_title(uppercase), catalog.text(99))
+}
+
+fn listen_for_title_changes(context: &Context) -> Receiver<bool> {
+    let (send, receive) = mpsc::channel();
+    let context = context.clone();
+    std::thread::spawn(move || {
+        let mut input = io::stdin().lock();
+        let mut code = [0];
+        while input.read_exact(&mut code).is_ok() {
+            let uppercase = code[0] == b'1';
+            if send.send(uppercase).is_err() {
+                break;
+            }
+            context.request_repaint();
+        }
+    });
+    receive
+}
+
 pub fn run(
     icon: IconData,
     language: &str,
@@ -26,7 +54,11 @@ pub fn run(
     paths: Vec<PathBuf>,
 ) -> eframe::Result {
     let catalog = Catalog::new(language);
-    let title = format!("Tenka — {}", catalog.text(99));
+    let title_case = std::env::var(TITLE_CASE_ENV).ok();
+    let title = window_title(
+        &catalog,
+        title_case.as_deref() == Some(title_case_code(true)),
+    );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka.compare")
@@ -46,6 +78,7 @@ pub fn run(
             crate::theme::apply_light_text_contrast(&creation.egui_ctx);
             let mut comparison = Comparison {
                 catalog,
+                title_changes: title_case.map(|_| listen_for_title_changes(&creation.egui_ctx)),
                 theme,
                 system_theme: SystemTheme::new(&creation.egui_ctx),
                 images: Vec::new(),
@@ -62,6 +95,7 @@ pub fn run(
 
 struct Comparison {
     catalog: Catalog,
+    title_changes: Option<Receiver<bool>>,
     theme: ThemePreference,
     system_theme: SystemTheme,
     images: Vec<Entry>,
@@ -154,7 +188,11 @@ impl Comparison {
     fn show_images(&mut self, ui: &mut Ui) {
         let area = ui.max_rect();
         if self.images.is_empty() {
-            let drop_area = area.shrink2(vec2(20.0, 15.0));
+            let margin = f32::from(DROP_AREA_SIDE_MARGIN);
+            let drop_area = Rect::from_min_max(
+                area.min + vec2(margin, 15.0),
+                area.max - Vec2::splat(margin),
+            );
             if ui
                 .scope_builder(egui::UiBuilder::new().max_rect(drop_area), |ui| {
                     empty_drop_area(ui, self.catalog.text(11), self.catalog.text(8))
@@ -295,6 +333,16 @@ impl Comparison {
 impl eframe::App for Comparison {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let context = &ui.ctx().clone();
+        if let Some(uppercase) = self
+            .title_changes
+            .as_ref()
+            .and_then(|changes| changes.try_iter().last())
+        {
+            context.send_viewport_cmd(egui::ViewportCommand::Title(window_title(
+                &self.catalog,
+                uppercase,
+            )));
+        }
         self.system_theme.apply(context, self.theme);
         self.add(take_dropped_paths(context));
         egui::Panel::top("comparison_controls").show(ui, |ui| {

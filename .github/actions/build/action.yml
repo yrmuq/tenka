@@ -75,12 +75,17 @@ runs:
             cat "$XDG_RUNTIME_DIR/weston.log"
             exit 1
           fi
+          mkfifo "$XDG_RUNTIME_DIR/title"
+          exec 9<>"$XDG_RUNTIME_DIR/title"
           for window in convert compare; do
             args=()
-            if [[ "$window" == compare ]]; then args=(--compare en light); fi
+            if [[ "$window" == compare ]]; then
+              args=(--compare en light)
+              export TENKA_COMPARE_UPPERCASE_TITLE=1
+            fi
             log="$XDG_RUNTIME_DIR/$window.log"
             env -u DISPLAY WAYLAND_DEBUG=client ./dist/Tenka-x86_64.AppImage \
-              --appimage-extract-and-run "${args[@]}" >"$log" 2>&1 &
+              --appimage-extract-and-run "${args[@]}" <&9 >"$log" 2>&1 &
             app=$!
             for attempt in {1..100}; do
               if grep -qE "xdg_surface[@#][0-9]+\.ack_configure" "$log"; then break; fi
@@ -92,6 +97,15 @@ runs:
               exit 1
             fi
             grep -E "xdg_toplevel[@#][0-9]+\.set_app_id\(\"io\.github\.yrmuq\.tenka\"\)" "$log"
+            if [[ "$window" == compare ]]; then
+              grep -F "set_title(\"TENKA — Compare images\")" "$log"
+              printf 0 >&9
+              for attempt in {1..100}; do
+                if grep -Fq "set_title(\"Tenka — Compare images\")" "$log"; then break; fi
+                sleep 0.1
+              done
+              grep -F "set_title(\"Tenka — Compare images\")" "$log"
+            fi
             kill "$app"
             wait "$app" || true
             app=

@@ -40,6 +40,7 @@ impl Settings {
 
 pub struct WindowSize {
     settings: Settings,
+    uppercase_title: bool,
     last_inner_size: Option<egui::Vec2>,
     resize_pending: bool,
     starting: bool,
@@ -49,10 +50,15 @@ impl WindowSize {
     pub fn new() -> Self {
         Self {
             settings: Settings::default(),
+            uppercase_title: false,
             last_inner_size: None,
             resize_pending: false,
             starting: true,
         }
+    }
+
+    pub fn uppercase_title(&self) -> bool {
+        self.uppercase_title
     }
 
     fn apply(&mut self, context: &Context) {
@@ -152,8 +158,10 @@ impl WindowSize {
                     );
                     ui.end_row();
                 });
+                ui.checkbox(&mut self.uppercase_title, catalog.text(201));
                 if ui.button(catalog.text(182)).clicked() {
                     self.settings = Settings::default();
+                    self.uppercase_title = false;
                 }
             });
         if previous != self.settings {

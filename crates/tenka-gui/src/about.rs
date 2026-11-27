@@ -167,9 +167,11 @@ impl About {
             let title_left = table_left + upstream;
             let mut title_font = egui::TextStyle::Heading.resolve(ui.style());
             title_font.size *= 2.0;
-            let title =
-                ui.painter()
-                    .layout_no_wrap("Tenka".into(), title_font, ui.visuals().text_color());
+            let title = ui.painter().layout_no_wrap(
+                crate::app_title(window.uppercase_title()).into(),
+                title_font,
+                ui.visuals().text_color(),
+            );
             let spacing = ui.spacing().item_spacing;
             let project_left = table_left + details;
             let row_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -312,6 +314,7 @@ fn components() -> &'static [Component] {
 }
 
 fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
+    let half_row_spacing = ROW_SPACING * 0.5;
     let mut row_dividers = Vec::with_capacity(components().len());
     let grid = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -322,12 +325,13 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
             .max_col_width(350.0)
             .spacing(egui::vec2(COLUMN_SPACING, ROW_SPACING))
             .show(ui, |ui| {
+                let top = ui.cursor().top() - half_row_spacing;
                 let first = ui.strong(catalog.text(166));
                 let upstream = ui.strong(catalog.text(167));
                 let details = ui.strong(catalog.text(168));
                 ui.end_row();
                 for component in components() {
-                    row_dividers.push(ui.next_widget_position().y - ROW_SPACING * 0.5);
+                    row_dividers.push(ui.cursor().top() - half_row_spacing);
                     ui.label(component.name);
                     ui.hyperlink_to(component.upstream, component.url);
                     ui.label(catalog.translate(component.details));
@@ -336,13 +340,14 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
                 (
                     upstream.rect.left() - first.rect.left(),
                     details.rect.left() - first.rect.left(),
+                    top..=ui.cursor().top() - half_row_spacing,
                 )
             })
     });
     let grid = grid.inner;
-    let (upstream, details) = grid.inner;
+    let (upstream, details, rows) = grid.inner;
     let body = grid.response.rect;
-    let border = body.expand2(egui::vec2(COLUMN_SPACING, ROW_SPACING) * 0.5);
+    let border = egui::Rect::from_x_y_ranges(body.x_range().expand(COLUMN_SPACING * 0.5), rows);
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     ui.painter()
         .rect_stroke(border, 0.0, stroke, egui::StrokeKind::Inside);
@@ -439,6 +444,38 @@ mod tests {
                 })
                 .unwrap()
         };
+        let mut row_edges = vec![table_border.top()];
+        row_edges.extend(output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::LineSegment { points, .. }
+                if points[0].y == points[1].y
+                    && (points[0].x - table_border.left()).abs() <= 1.0
+                    && (points[1].x - table_border.right()).abs() <= 1.0 =>
+            {
+                Some(points[0].y)
+            }
+            _ => None,
+        }));
+        row_edges.push(table_border.bottom());
+        assert_eq!(row_edges.len(), components().len() + 2);
+        let labels = std::iter::once([catalog.text(166), catalog.text(167), catalog.text(168)])
+            .chain(components().iter().map(|component| {
+                [
+                    component.name,
+                    component.upstream,
+                    catalog.translate(component.details),
+                ]
+            }));
+        for (bounds, labels) in row_edges.windows(2).zip(labels) {
+            let center = f32::midpoint(bounds[0], bounds[1]);
+            for label in labels {
+                let text = text_rect(label);
+                assert!(
+                    (text.center().y - center).abs() <= 1.0,
+                    "{label}: {text:?} in {bounds:?}"
+                );
+            }
+        }
+
         let logo_anchor = logo.min + about.logo.as_ref().unwrap().anchor;
         assert!((logo_anchor.x - table_border.left() - COLUMN_SPACING * 0.5).abs() <= 1.0);
         assert!((logo_anchor.x - text_rect(catalog.text(166)).left()).abs() <= 1.0);

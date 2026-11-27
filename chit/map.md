@@ -5,7 +5,7 @@
 - `crates/tenka-core/src/jxl_header.rs` validates JPEG XL dimensions, bit depth, and animation before decoding files for comparison.
 - `crates/tenka-gui/src/main.rs` implements the conversion window and routes batch work through a background worker.
 - `crates/tenka-gui/src/about.rs` renders About, reads attribution rows from the README, and opens the hidden window settings from the logo.
-- `crates/tenka-gui/src/window_size.rs` applies main window dimensions and resize constraints to the native viewport.
+- `crates/tenka-gui/src/window_size.rs` renders the Secret menu and manages its window size and title settings.
 - `crates/tenka-gui/src/image_info.rs` loads image and filesystem metadata, shows the details dialog, and opens the previewed file in its default viewer.
 - `crates/tenka-gui/src/updates.rs` checks GitHub for a newer stable release when requested from About.
 - `crates/tenka-gui/src/jobs.rs` bridges the desktop interface to the library, scans imported folders, probes queued file sizes and dimensions, and handles file saving and desktop opening requests.

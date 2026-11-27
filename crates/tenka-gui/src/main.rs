@@ -16,8 +16,9 @@ mod window_size;
 use std::{
     collections::HashSet,
     ffi::OsStr,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -40,8 +41,13 @@ use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
 const ACTION_GAP: f32 = 15.0;
+const DROP_AREA_SIDE_MARGIN: i8 = 20;
 const APP_ID: &str = "io.github.yrmuq.tenka";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
+
+fn app_title(uppercase: bool) -> &'static str {
+    if uppercase { "TENKA" } else { "Tenka" }
+}
 
 fn main() -> eframe::Result {
     #[cfg(target_os = "linux")]
@@ -75,7 +81,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Tenka",
+        app_title(false),
         options,
         Box::new(|context| Ok(Box::new(Tenka::new(context)))),
     )
@@ -225,8 +231,6 @@ impl Tenka {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(RichText::new("Tenka").strong().size(24.0));
-                    ui.add_space(12.0);
                     ui.menu_button(self.label(183), |ui| {
                         if ui.button(self.label(109)).clicked() {
                             ui.close();
@@ -1130,6 +1134,11 @@ impl Tenka {
             Command::new(executable)
                 .args(["--compare", &self.language, theme_name(self.theme)])
                 .args(paths)
+                .env(
+                    comparison::TITLE_CASE_ENV,
+                    comparison::title_case_code(self.window_size.uppercase_title()),
+                )
+                .stdin(Stdio::piped())
                 .spawn()
         });
         match child {
@@ -1203,15 +1212,26 @@ impl eframe::App for Tenka {
         if !self.queue.is_empty() {
             self.footer(ui);
         }
+        let mut margin = egui::Margin::symmetric(DROP_AREA_SIDE_MARGIN, ACTION_GAP as i8);
+        if self.queue.is_empty() {
+            margin.bottom = margin.left;
+        }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::central_panel(ui.style())
-                    .inner_margin(egui::Margin::symmetric(20, ACTION_GAP as i8)),
-            )
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| self.show_convert(ui));
         self.show_completion(context);
+        let previous_title = self.window_size.uppercase_title();
         self.about
             .show(context, &self.catalog, &mut self.window_size);
+        let uppercase = self.window_size.uppercase_title();
+        if uppercase != previous_title {
+            context.send_viewport_cmd(egui::ViewportCommand::Title(app_title(uppercase).into()));
+            for child in &mut self.comparison_windows {
+                if let Some(input) = &mut child.stdin {
+                    let _ = input.write_all(comparison::title_case_code(uppercase).as_bytes());
+                }
+            }
+        }
         self.image_info.show(context, &self.catalog);
         self.poll_comparison_windows(context);
     }
@@ -1448,6 +1468,27 @@ mod tests {
             )
         };
         let main = render(Vec::new());
+        assert!(text_position(&main, "Tenka").is_none());
+        assert!(text_position(&main, "Tools").unwrap().x < 60.0);
+        let drop_area = main
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect)
+                    if rect.rect.width() > 700.0
+                        && rect.rect.height() > 300.0
+                        && rect.fill == egui::Color32::TRANSPARENT
+                        && !rect.stroke.is_empty() =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let margin = f32::from(DROP_AREA_SIDE_MARGIN);
+        assert!((drop_area.left() - margin).abs() <= 1.0);
+        assert!((MAIN_WINDOW_SIZE.x - drop_area.right() - margin).abs() <= 1.0);
+        assert!((MAIN_WINDOW_SIZE.y - drop_area.bottom() - margin).abs() <= 1.0);
         let info = main
             .shapes
             .iter()
@@ -1492,7 +1533,15 @@ mod tests {
         render(click(logo));
         render(Vec::new());
         let settings = render(Vec::new());
-        for label in ["Secret menu", "Width", "Height", "760", "620", "Reset"] {
+        for label in [
+            "Secret menu",
+            "Width",
+            "Height",
+            "760",
+            "620",
+            "Use uppercase app title",
+            "Reset",
+        ] {
             assert!(text_position(&settings, label).is_some(), "{label}");
         }
         render(click(text_position(&settings, "760").unwrap()));
@@ -1519,6 +1568,13 @@ mod tests {
                 .any(|command| matches!(command, egui::ViewportCommand::Resizable(false)))
         );
 
+        let title_toggle = text_position(&render(Vec::new()), "Use uppercase app title").unwrap();
+        let output = render(click(title_toggle));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Title(title) if title == "TENKA")));
+
         let reset = text_position(&render(Vec::new()), "Reset").unwrap();
         let output = render(click(reset));
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
@@ -1528,9 +1584,14 @@ mod tests {
                 .any(|command| matches!(command, egui::ViewportCommand::Resizable(true)))
         );
         assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == MAIN_WINDOW_SIZE)));
+        assert!(commands.iter().any(
+            |command| matches!(command, egui::ViewportCommand::Title(title) if title == "Tenka")
+        ));
 
         render(click(Pos2::new(10.0, 10.0)));
         assert!(text_position(&render(Vec::new()), "Secret menu").is_some());
+        let title_toggle = text_position(&render(Vec::new()), "Use uppercase app title").unwrap();
+        render(click(title_toggle));
         render(vec![InputEvent::Key {
             key: egui::Key::Escape,
             physical_key: None,
@@ -1538,7 +1599,9 @@ mod tests {
             repeat: false,
             modifiers: Modifiers::NONE,
         }]);
-        assert!(text_position(&render(Vec::new()), "Repository").is_some());
+        let about = render(Vec::new());
+        assert!(text_position(&about, "Repository").is_some());
+        assert!(text_position(&about, "TENKA").is_some());
     }
 
     #[test]
