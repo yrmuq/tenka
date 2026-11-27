@@ -25,6 +25,7 @@ const MAX_PIXELS: u64 = 36_000_000;
 const MAX_JPEG_XL_PIXELS: u64 = 80_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
+const CHEAP_MIN_QUALITY: u8 = 88;
 const BLOCK_ERROR_PER_POINT: f64 = 0.4;
 const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
@@ -387,8 +388,12 @@ impl Source {
         reversible: Option<Output>,
     ) -> Result<Option<Output>> {
         let detailed = mode != OptimizationMode::Best;
+        let min_quality = match mode {
+            OptimizationMode::Cheap => CHEAP_MIN_QUALITY,
+            OptimizationMode::Best | OptimizationMode::Balance => DEFAULT_QUALITY,
+        };
         let mut search = Search {
-            min_quality: f64::from(DEFAULT_QUALITY),
+            min_quality: f64::from(min_quality),
             max_bytes: usize::MAX,
             detailed,
             exhaustive: false,
@@ -893,9 +898,15 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(output.quality >= f64::from(DEFAULT_QUALITY));
+        assert!(output.quality >= f64::from(CHEAP_MIN_QUALITY));
         assert!(output.bytes.len() < lossless.bytes.len());
         assert_eq!(output.dimensions, source.dimensions());
+        let local_error = raster::QualityReference::new(&source.0)
+            .compare(&output.preview().unwrap())
+            .unwrap()
+            .unwrap()
+            .max_block_error;
+        assert!(local_error <= 4.8);
     }
 
     #[test]
