@@ -10,6 +10,13 @@ const MAX_DIMENSION: u16 = 8192;
 pub const DEFAULT_SIZE: egui::Vec2 = egui::vec2(DEFAULT_WIDTH as f32, DEFAULT_HEIGHT as f32);
 pub const MIN_SIZE: egui::Vec2 = egui::vec2(MIN_WIDTH as f32, MIN_HEIGHT as f32);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolsPosition {
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct Settings {
     resizable: bool,
@@ -41,8 +48,7 @@ impl Settings {
 pub struct WindowSize {
     settings: Settings,
     uppercase_title: bool,
-    conversion_left: bool,
-    tools_centered: bool,
+    tools_position: ToolsPosition,
     last_inner_size: Option<egui::Vec2>,
     resize_pending: bool,
     starting: bool,
@@ -53,8 +59,7 @@ impl WindowSize {
         Self {
             settings: Settings::default(),
             uppercase_title: false,
-            conversion_left: false,
-            tools_centered: false,
+            tools_position: ToolsPosition::Right,
             last_inner_size: None,
             resize_pending: false,
             starting: true,
@@ -65,12 +70,8 @@ impl WindowSize {
         self.uppercase_title
     }
 
-    pub fn conversion_left(&self) -> bool {
-        self.conversion_left
-    }
-
-    pub fn tools_centered(&self) -> bool {
-        self.tools_centered
+    pub(crate) fn tools_position(&self) -> ToolsPosition {
+        self.tools_position
     }
 
     fn apply(&mut self, context: &Context) {
@@ -171,13 +172,21 @@ impl WindowSize {
                     ui.end_row();
                 });
                 ui.checkbox(&mut self.uppercase_title, catalog.text(201));
-                ui.checkbox(&mut self.conversion_left, catalog.text(202));
-                ui.checkbox(&mut self.tools_centered, catalog.text(203));
+                for (position, label) in [(ToolsPosition::Center, 203), (ToolsPosition::Left, 204)]
+                {
+                    let mut selected = self.tools_position == position;
+                    if ui.checkbox(&mut selected, catalog.text(label)).changed() {
+                        self.tools_position = if selected {
+                            position
+                        } else {
+                            ToolsPosition::Right
+                        };
+                    }
+                }
                 if ui.button(catalog.text(182)).clicked() {
                     self.settings = Settings::default();
                     self.uppercase_title = false;
-                    self.conversion_left = false;
-                    self.tools_centered = false;
+                    self.tools_position = ToolsPosition::Right;
                 }
             });
         if previous != self.settings {

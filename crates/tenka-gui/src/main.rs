@@ -37,7 +37,7 @@ use jobs::{Conversion, Event, Failure, InputFile, InputProbe, ScannedInputs};
 use language::Catalog;
 use summary::Summary;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
-use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
+use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, ToolsPosition, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
 const ACTION_GAP: f32 = 15.0;
@@ -225,8 +225,7 @@ impl Tenka {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        let conversion_left = self.window_size.conversion_left();
-        let tools_centered = self.window_size.tools_centered();
+        let tools_position = self.window_size.tools_position();
         egui::Panel::top("navigation")
             .frame(
                 egui::Frame::side_top_panel(ui.style())
@@ -234,7 +233,7 @@ impl Tenka {
             )
             .show(ui, |ui| {
                 let center_x = ui.available_rect_before_wrap().center().x;
-                let tools_size = tools_centered.then(|| {
+                let tools_size = (tools_position == ToolsPosition::Center).then(|| {
                     let font = egui::TextStyle::Button.resolve(ui.style());
                     let label = ui.painter().layout_no_wrap(
                         self.label(183).into(),
@@ -245,23 +244,14 @@ impl Tenka {
                     padded.max(ui.spacing().interact_size)
                 });
                 let row = ui.horizontal(|ui| {
-                    if conversion_left {
-                        ui.add_enabled_ui(self.worker.is_none(), |ui| {
-                            self.quality_selector(ui, SELECTOR_WIDTH);
-                            self.format_selector(ui, SELECTOR_WIDTH);
-                        });
-                    }
-                    if !tools_centered {
+                    ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                        self.quality_selector(ui);
+                        self.format_selector(ui);
+                    });
+                    if tools_position == ToolsPosition::Left {
                         self.tools_menu(ui);
                     }
-                    let mut right = ui.available_rect_before_wrap();
-                    if let Some(size) = tools_size {
-                        let reserved = center_x + size.x * 0.5 + ui.spacing().item_spacing.x;
-                        right.min.x = right.left().max(reserved);
-                    }
-                    let layout = egui::Layout::right_to_left(egui::Align::Center);
-                    let builder = egui::UiBuilder::new().max_rect(right).layout(layout);
-                    ui.scope_builder(builder, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::about(ui, self.label(153)).clicked() {
                             self.about.open();
                         }
@@ -291,13 +281,8 @@ impl Tenka {
                             .into();
                             self.catalog = Catalog::new(&self.language);
                         }
-                        if !conversion_left {
-                            let available = ui.available_width() - ui.spacing().item_spacing.x;
-                            let width = (available * 0.5).clamp(0.0, SELECTOR_WIDTH);
-                            ui.add_enabled_ui(self.worker.is_none(), |ui| {
-                                self.format_selector(ui, width);
-                                self.quality_selector(ui, width);
-                            });
+                        if tools_position == ToolsPosition::Right {
+                            self.tools_menu(ui);
                         }
                     });
                 });
@@ -319,11 +304,10 @@ impl Tenka {
         .response
     }
 
-    fn format_selector(&mut self, ui: &mut Ui, width: f32) {
+    fn format_selector(&mut self, ui: &mut Ui) {
         ComboBox::from_id_salt("output_format")
             .selected_text(self.format.name())
-            .width(width)
-            .truncate()
+            .width(SELECTOR_WIDTH)
             .show_ui(ui, |ui| {
                 theme::accent_selection(ui);
                 for format in OutputFormat::ALL {
@@ -334,7 +318,7 @@ impl Tenka {
             .on_hover_text(self.label(73));
     }
 
-    fn quality_selector(&mut self, ui: &mut Ui, width: f32) {
+    fn quality_selector(&mut self, ui: &mut Ui) {
         let modes = [
             (OptimizationMode::Best, 111, 114),
             (OptimizationMode::Balance, 112, 115),
@@ -347,8 +331,7 @@ impl Tenka {
         };
         ComboBox::from_id_salt("mode")
             .selected_text(self.label(selected))
-            .width(width)
-            .truncate()
+            .width(SELECTOR_WIDTH)
             .show_ui(ui, |ui| {
                 theme::accent_selection(ui);
                 for (mode, label, hint) in modes {
@@ -1515,9 +1498,31 @@ mod tests {
                 |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
             )
         };
+        let check_toolbar = |frame: &FullOutput, position| {
+            let center = MAIN_WINDOW_SIZE.x * 0.5;
+            let quality = text_position(frame, "Best").unwrap().x;
+            let format = text_position(frame, "JPEG XL").unwrap().x;
+            let tools = text_position(frame, "Tools").unwrap().x;
+            assert!(quality < format && format < center);
+            match position {
+                ToolsPosition::Left => assert!(format < tools && tools < center),
+                ToolsPosition::Center => assert!((tools - center).abs() <= 1.0),
+                ToolsPosition::Right => {
+                    let globe = frame
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            Shape::Circle(circle) if circle.radius == 8.0 => Some(circle.center.x),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert!(tools > center && tools < globe && globe - tools < 70.0);
+                }
+            }
+        };
         let main = render(Vec::new());
         assert!(text_position(&main, "Tenka").is_none());
-        assert!(text_position(&main, "Tools").unwrap().x < 60.0);
+        check_toolbar(&main, ToolsPosition::Right);
         let drop_area = main
             .shapes
             .iter()
@@ -1588,34 +1593,25 @@ mod tests {
             "760",
             "620",
             "Use uppercase app title",
-            "Quality and format on the left",
             "Center Tools",
+            "Tools on the left",
             "Reset",
         ] {
             assert!(text_position(&settings, label).is_some(), "{label}");
         }
-        let center = MAIN_WINDOW_SIZE.x * 0.5;
-        for (option, conversion_left, tools_centered) in [
-            ("Quality and format on the left", true, false),
-            ("Quality and format on the left", false, false),
-            ("Center Tools", false, true),
-            ("Quality and format on the left", true, true),
+        assert!(text_position(&settings, "Quality and format on the left").is_none());
+        for (option, position) in [
+            ("Center Tools", ToolsPosition::Center),
+            ("Tools on the left", ToolsPosition::Left),
+            ("Tools on the left", ToolsPosition::Right),
+            ("Tools on the left", ToolsPosition::Left),
+            ("Center Tools", ToolsPosition::Center),
+            ("Center Tools", ToolsPosition::Right),
+            ("Tools on the left", ToolsPosition::Left),
         ] {
             let frame = render(Vec::new());
             render(click(text_position(&frame, option).unwrap()));
-            let frame = render(Vec::new());
-            let tools = text_position(&frame, "Tools").unwrap().x;
-            let quality = text_position(&frame, "Best").unwrap().x;
-            let format = text_position(&frame, "JPEG XL").unwrap().x;
-            assert!(quality < format);
-            assert_eq!(format < center, conversion_left);
-            if tools_centered {
-                assert!((tools - center).abs() <= 1.0, "{option}: {tools}");
-            } else if conversion_left {
-                assert!(format < tools);
-            } else {
-                assert!(tools < 60.0);
-            }
+            check_toolbar(&render(Vec::new()), position);
         }
         render(click(text_position(&settings, "760").unwrap()));
         render(Vec::new());
@@ -1661,9 +1657,7 @@ mod tests {
             |command| matches!(command, egui::ViewportCommand::Title(title) if title == "Tenka")
         ));
 
-        let reset_header = render(Vec::new());
-        assert!(text_position(&reset_header, "Tools").unwrap().x < 60.0);
-        assert!(text_position(&reset_header, "Best").unwrap().x > center);
+        check_toolbar(&render(Vec::new()), ToolsPosition::Right);
 
         render(click(Pos2::new(10.0, 10.0)));
         assert!(text_position(&render(Vec::new()), "Secret menu").is_some());
