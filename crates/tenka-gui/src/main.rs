@@ -629,13 +629,10 @@ impl Tenka {
                     .button(format!("{} · {}", self.label(124), summary.errors))
                     .clicked();
             let open_folder = summary.folder().is_some_and(|_| {
-                let footer = ui.available_rect_before_wrap();
                 ui.add_space(footer_gap);
-                let button = ui.vertical_centered(|ui| ui.button(self.label(143))).inner;
-                let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-                ui.painter()
-                    .hline(footer.x_range(), button.rect.top() - footer_gap, stroke);
-                button.clicked()
+                ui.vertical_centered(|ui| ui.button(self.label(143)))
+                    .inner
+                    .clicked()
             });
             (open_errors, open_folder)
         });
@@ -2028,30 +2025,11 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let divider = modal
-            .shapes
-            .iter()
-            .find_map(|shape| match shape.shape {
-                Shape::LineSegment { points: [a, b], .. }
-                    if a.y == b.y
-                        && a.y > table.bottom()
-                        && a.y < button.top()
-                        && b.x - a.x > 300.0 =>
-                {
-                    Some(a.y)
-                }
-                _ => None,
-            })
-            .unwrap();
-        let frame = ctx
-            .memory(|memory| memory.area_rect(egui::Id::unique("conversion_summary")))
-            .unwrap();
-        let gap_above = button.top() - divider;
-        let gap_below = frame.bottom() - button.bottom();
-        assert!(
-            (gap_above - gap_below).abs() < 2.0,
-            "{gap_above} vs {gap_below}"
-        );
+        assert!(!modal.shapes.iter().any(|shape| {
+            matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
+                if a.y == b.y && a.y > table.bottom()
+                    && a.y < button.top() && b.x - a.x > 300.0)
+        }));
         let arrow_shafts = modal
             .shapes
             .iter()
