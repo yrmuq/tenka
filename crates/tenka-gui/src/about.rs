@@ -2,6 +2,7 @@ use std::sync::{
     OnceLock,
     mpsc::{Receiver, TryRecvError},
 };
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, ColorImage, Context, TextureHandle, TextureOptions, Ui};
 
@@ -10,14 +11,41 @@ use crate::{
     jobs::Failure,
     language::Catalog,
     updates::{self, ReleaseStatus},
+    window_size::WindowSize,
 };
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const LICENSE: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/LICENSE");
 
 #[derive(Default)]
+struct LogoTaps {
+    count: u8,
+    last: Option<Instant>,
+}
+
+impl LogoTaps {
+    fn push(&mut self, now: Instant) -> bool {
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) > Duration::from_secs(2))
+        {
+            self.count = 0;
+        }
+        self.last = Some(now);
+        self.count += 1;
+        if self.count == 5 {
+            *self = Self::default();
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Default)]
 pub struct About {
     open: bool,
+    window_settings_open: bool,
+    logo_taps: LogoTaps,
     logo: Option<TextureHandle>,
     request: Option<Receiver<Result<ReleaseStatus, Failure>>>,
     status: Option<Result<ReleaseStatus, Failure>>,
@@ -28,7 +56,7 @@ impl About {
         self.open = true;
     }
 
-    pub fn show(&mut self, context: &Context, catalog: &Catalog) {
+    pub fn show(&mut self, context: &Context, catalog: &Catalog, window: &mut WindowSize) {
         if let Some(request) = &self.request {
             let status = match request.try_recv() {
                 Ok(status) => Some(status),
@@ -44,6 +72,13 @@ impl About {
             }
         }
         if !self.open {
+            return;
+        }
+        if self.window_settings_open {
+            if window.show(context, catalog) {
+                self.window_settings_open = false;
+                context.request_repaint();
+            }
             return;
         }
 
@@ -69,9 +104,16 @@ impl About {
             });
             ui.add_space(12.0);
             let mut check_for_updates = false;
+            let mut logo_clicked = false;
             ui.columns(2, |columns| {
                 columns[0].vertical_centered(|ui| {
-                    ui.add(egui::Image::new(&*logo).fit_to_exact_size(egui::vec2(88.0, 88.0)));
+                    logo_clicked = ui
+                        .add(
+                            egui::Image::new(&*logo)
+                                .fit_to_exact_size(egui::vec2(88.0, 88.0))
+                                .sense(egui::Sense::click()),
+                        )
+                        .clicked();
                     ui.heading("Tenka");
                 });
                 columns[1].horizontal(|ui| {
@@ -93,13 +135,18 @@ impl About {
             });
             ui.add_space(18.0);
             show_components(ui, catalog);
-            check_for_updates
+            (check_for_updates, logo_clicked)
         });
-        if response.inner {
+        let (check_for_updates, logo_clicked) = response.inner;
+        if check_for_updates {
             self.request = Some(updates::start(context));
         }
         if response.should_close() {
             self.open = false;
+            self.logo_taps = LogoTaps::default();
+        } else if logo_clicked && self.logo_taps.push(Instant::now()) {
+            self.window_settings_open = true;
+            context.request_repaint();
         }
     }
 }

@@ -8,6 +8,7 @@ mod language;
 mod summary;
 mod theme;
 mod updates;
+mod window_size;
 
 use std::{
     collections::HashSet,
@@ -32,9 +33,9 @@ use jobs::{Conversion, Event, Failure, InputFile, InputProbe, ScannedInputs};
 use language::Catalog;
 use summary::Summary;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
+use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
-const MAIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 650.0);
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
 
 fn main() -> eframe::Result {
@@ -55,7 +56,7 @@ fn main() -> eframe::Result {
             .with_app_id("io.github.yrmuq.tenka")
             .with_icon(icon),
         window_builder: Some(Box::new(|window| {
-            // Override the size and maximized state saved by resizable versions.
+            // Start with the defaults until the main window preferences are loaded.
             window
                 .with_inner_size(MAIN_WINDOW_SIZE)
                 .with_min_inner_size(MAIN_WINDOW_SIZE)
@@ -111,6 +112,7 @@ struct Tenka {
     system_theme: theme::SystemTheme,
     catalog: Catalog,
     about: about::About,
+    window_size: WindowSize,
     queue: Vec<QueueEntry>,
     queue_jump: Option<usize>,
     scan_requests: Sender<Vec<PathBuf>>,
@@ -133,10 +135,6 @@ struct Tenka {
 
 impl Tenka {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
-        // Winit creates its Wayland decoration frame after applying startup size hints.
-        context
-            .egui_ctx
-            .send_viewport_cmd(egui::ViewportCommand::Resizable(false));
         let read = |key| context.storage.and_then(|storage| storage.get_string(key));
         let language = read("language")
             .filter(|value| value == "en")
@@ -169,6 +167,7 @@ impl Tenka {
         Self {
             catalog: Catalog::new(&language),
             about: about::About::default(),
+            window_size: WindowSize::load(&context.egui_ctx, context.storage),
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
@@ -1102,24 +1101,7 @@ impl Tenka {
 impl eframe::App for Tenka {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let context = &ui.ctx().clone();
-        let size_change = context.input(|input| {
-            let window = input.viewport();
-            if window.fullscreen == Some(true) {
-                Some(egui::ViewportCommand::Fullscreen(false))
-            } else if window.maximized == Some(true) {
-                Some(egui::ViewportCommand::Maximized(false))
-            } else if window
-                .inner_rect
-                .is_some_and(|rect| (rect.size() - MAIN_WINDOW_SIZE).abs().max_elem() > 1.0)
-            {
-                Some(egui::ViewportCommand::InnerSize(MAIN_WINDOW_SIZE))
-            } else {
-                None
-            }
-        });
-        if let Some(command) = size_change {
-            context.send_viewport_cmd(command);
-        }
+        self.window_size.update(context);
         self.system_theme.apply(context, self.theme);
         self.scan_paths(take_dropped_paths(context));
         self.poll_scans();
@@ -1143,13 +1125,15 @@ impl eframe::App for Tenka {
             )
             .show(ui, |ui| self.show_convert(ui));
         self.show_completion(context);
-        self.about.show(context, &self.catalog);
+        self.about
+            .show(context, &self.catalog, &mut self.window_size);
         self.poll_comparison_windows(context);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("language", self.language.clone());
         storage.set_string("theme", theme_name(self.theme).into());
+        self.window_size.save(storage);
     }
 }
 
@@ -1281,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn the_information_button_after_the_theme_opens_about() {
+    fn about_opens_from_the_header_and_hides_window_settings_behind_the_logo() {
         use eframe::App as _;
 
         let ctx = Context::default();
@@ -1325,6 +1309,58 @@ mod tests {
         ] {
             assert!(text_position(&about, label).is_some(), "{label}");
         }
+
+        let logo = about
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect.center()),
+                _ => None,
+            })
+            .unwrap();
+        for _ in 0..4 {
+            render(click(logo));
+            assert!(text_position(&render(Vec::new()), "Window settings").is_none());
+        }
+        render(click(logo));
+        render(Vec::new());
+        let settings = render(Vec::new());
+        for label in ["Window settings", "Width", "Height", "960", "650", "Reset"] {
+            assert!(text_position(&settings, label).is_some(), "{label}");
+        }
+        render(click(text_position(&settings, "960").unwrap()));
+        render(Vec::new());
+        render(vec![InputEvent::Text("1040".into())]);
+        let resized = render(vec![InputEvent::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(resized.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(1040.0, 650.0))));
+
+        let unlock = text_position(&render(Vec::new()), "Unlock window resizing").unwrap();
+        let output = render(click(unlock));
+        assert!(
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(true)))
+        );
+
+        let reset = text_position(&render(Vec::new()), "Reset").unwrap();
+        let output = render(click(reset));
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(false)))
+        );
+        assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == MAIN_WINDOW_SIZE)));
     }
 
     #[test]

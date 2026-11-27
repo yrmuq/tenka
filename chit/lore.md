@@ -18,4 +18,4 @@
 
 ## Compatibility Workarounds
 
-- Lock the main window after creation as well as setting its size limits at startup, since Winit 0.30's fallback Wayland decorations are created after the size hints and initially allow resizing.
+- Apply the main window resize lock after creation as well as setting its size limits at startup, since Winit 0.30's fallback Wayland decorations are created after the size hints and initially allow resizing.
