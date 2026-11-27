@@ -606,51 +606,22 @@ impl Tenka {
             return;
         };
         let id = egui::Id::unique("conversion_summary");
-        let response = egui::Modal::new(id).show(context, |ui| {
+        let frame = egui::Frame::popup(&context.style_of(context.theme()));
+        let footer_gap = f32::from(frame.inner_margin.bottom) + frame.stroke.width;
+        let response = egui::Modal::new(id).frame(frame).show(context, |ui| {
             ui.set_width(360.0);
-            ui.horizontal(|ui| {
-                ui.heading(self.label(135));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::close(ui, self.label(142)).clicked() {
-                        ui.close_kind(egui::UiKind::Modal);
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            egui::Grid::new("summary_totals").show(ui, |ui| {
-                ui.label(self.label(136));
-                ui.horizontal(|ui| {
-                    ui.label(summary.attempted().to_string());
-                    icons::right_arrow(ui);
-                    ui.label(summary.converted.to_string());
-                });
-                ui.end_row();
-                ui.label(self.label(137));
-                ui.horizontal(|ui| {
-                    ui.label(self.catalog.file_size(summary.source_bytes));
-                    icons::right_arrow(ui);
-                    ui.label(self.catalog.file_size(summary.output_bytes));
-                });
-                ui.end_row();
-                if summary.source_bytes > 0 {
-                    let savings = summary.source_bytes.abs_diff(summary.output_bytes);
-                    let percent = (savings as f64 / summary.source_bytes as f64 * 100.0).round();
-                    let label = if summary.output_bytes > summary.source_bytes {
-                        139
-                    } else {
-                        138
-                    };
-                    ui.label(self.label(label));
-                    ui.strong(format!(
-                        "{} ({percent:.0}%)",
-                        self.catalog.file_size(savings)
-                    ));
-                    ui.end_row();
+            let header_x = ui.available_rect_before_wrap().x_range();
+            let header = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::close(ui, self.label(142)).clicked() {
+                    ui.close_kind(egui::UiKind::Modal);
                 }
-                ui.label(self.label(140));
-                ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
-                ui.end_row();
             });
+            let title = egui::Label::new(RichText::new(self.label(135)).heading());
+            let title_area =
+                Rect::from_x_y_ranges(header_x.expand(-28.0), header.response.rect.y_range());
+            ui.place(title_area, title);
+            ui.add_space(6.0);
+            self.show_completion_totals(ui, summary, id.with("table_width"));
             let mut open_errors = false;
             if summary.errors > 0 || summary.skipped > 0 {
                 ui.horizontal(|ui| {
@@ -664,10 +635,13 @@ impl Tenka {
                 });
             }
             let open_folder = summary.folder().is_some_and(|_| {
-                ui.separator();
-                ui.vertical_centered(|ui| ui.button(self.label(143)))
-                    .inner
-                    .clicked()
+                let footer = ui.available_rect_before_wrap();
+                ui.add_space(footer_gap);
+                let button = ui.vertical_centered(|ui| ui.button(self.label(143))).inner;
+                let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                ui.painter()
+                    .hline(footer.x_range(), button.rect.top() - footer_gap, stroke);
+                button.clicked()
             });
             (open_errors, open_folder)
         });
@@ -680,6 +654,85 @@ impl Tenka {
             self.completed_summary = None;
             self.open_batch_errors = open_errors;
             context.request_repaint();
+        }
+    }
+
+    fn show_completion_totals(&self, ui: &mut Ui, summary: &Summary, width_id: egui::Id) {
+        const SPACING: egui::Vec2 = egui::vec2(16.0, 6.0);
+        let width = ui.data(|data| data.get_temp::<f32>(width_id).unwrap_or_default());
+        let inset = if width > 0.0 {
+            ((ui.available_width() - width) * 0.5).max(SPACING.x * 0.5)
+        } else {
+            SPACING.x * 0.5
+        };
+        let item_gap = ui.spacing().item_spacing.x;
+        let mut row_dividers = Vec::with_capacity(3);
+        let grid = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(inset);
+                egui::Grid::new("summary_totals")
+                    .num_columns(2)
+                    .spacing(SPACING)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = item_gap;
+                        let top = ui.cursor().top() - SPACING.y * 0.5;
+                        ui.label(self.label(136));
+                        let files = ui.horizontal(|ui| {
+                            ui.label(summary.attempted().to_string());
+                            icons::right_arrow(ui);
+                            ui.label(summary.converted.to_string());
+                        });
+                        ui.end_row();
+                        row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        ui.label(self.label(137));
+                        ui.horizontal(|ui| {
+                            ui.label(self.catalog.file_size(summary.source_bytes));
+                            icons::right_arrow(ui);
+                            ui.label(self.catalog.file_size(summary.output_bytes));
+                        });
+                        ui.end_row();
+                        row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        if summary.source_bytes > 0 {
+                            let savings = summary.source_bytes.abs_diff(summary.output_bytes);
+                            let percent =
+                                (savings as f64 / summary.source_bytes as f64 * 100.0).round();
+                            let label = if summary.output_bytes > summary.source_bytes {
+                                139
+                            } else {
+                                138
+                            };
+                            ui.label(self.label(label));
+                            ui.strong(format!(
+                                "{} ({percent:.0}%)",
+                                self.catalog.file_size(savings)
+                            ));
+                            ui.end_row();
+                            row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        }
+                        ui.label(self.label(140));
+                        ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
+                        ui.end_row();
+                        let bottom = ui.cursor().top() - SPACING.y * 0.5;
+                        (files.response.rect.left(), top..=bottom)
+                    })
+            })
+            .inner;
+        let body = grid.response.rect;
+        if (width - body.width()).abs() > 0.5 {
+            ui.data_mut(|data| data.insert_temp(width_id, body.width()));
+            ui.request_discard("measure completion table width");
+        }
+
+        let (values_x, rows) = grid.inner;
+        let border = Rect::from_x_y_ranges(body.x_range().expand(SPACING.x * 0.5), rows);
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter()
+            .rect_stroke(border, 0.0, stroke, egui::StrokeKind::Inside);
+        ui.painter()
+            .vline(values_x - SPACING.x * 0.5, border.y_range(), stroke);
+        for row in row_dividers {
+            ui.painter().hline(border.x_range(), row, stroke);
         }
     }
 
@@ -1926,8 +1979,11 @@ mod tests {
         render(Vec::new());
         let modal = render(Vec::new());
         for label in [
-            "Conversion complete",
+            "Done",
+            "Files",
             "Sizes",
+            "Saved",
+            "Time",
             "3",
             "1",
             "2.0 KB",
@@ -1938,8 +1994,59 @@ mod tests {
         ] {
             assert!(text_position(&modal, label).is_some(), "{label}");
         }
-        let folder_button = text_position(&modal, "Open folder").unwrap();
-        assert!((folder_button.x - MAIN_WINDOW_SIZE.x / 2.0).abs() < 2.0);
+        let center = MAIN_WINDOW_SIZE.x * 0.5;
+        let folder = text_position(&modal, "Folder").unwrap();
+        let heading = text_position(&modal, "Done").unwrap();
+        assert!((folder.x - center).abs() < 2.0);
+        assert!((heading.x - center).abs() < 2.0);
+        let stats = text_position(&modal, "Sizes").unwrap();
+        let table = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect)
+                    if rect.fill == egui::Color32::TRANSPARENT
+                        && !rect.stroke.is_empty()
+                        && rect.rect.contains(stats) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!((table.center().x - center).abs() < 2.0);
+        assert!(modal.shapes.iter().any(|shape| {
+            matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
+                if a.x == b.x && (a.y - table.top()).abs() < 1.0
+                    && (b.y - table.bottom()).abs() < 1.0)
+        }));
+        let button = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.rect.width() < 100.0 && rect.rect.contains(folder) => {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let divider = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match shape.shape {
+                Shape::LineSegment { points: [a, b], .. }
+                    if a.y == b.y && a.y > table.bottom() && a.y < button.top()
+                        && b.x - a.x > 300.0 =>
+                {
+                    Some(a.y)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let frame = ctx
+            .memory(|memory| memory.area_rect(egui::Id::unique("conversion_summary")))
+            .unwrap();
+        assert!(((button.top() - divider) - (frame.bottom() - button.bottom())).abs() < 2.0);
         let arrow_shafts = modal
             .shapes
             .iter()
@@ -1954,7 +2061,7 @@ mod tests {
         ));
         render(Vec::new());
         let popup = render(Vec::new());
-        assert!(text_position(&popup, "Conversion complete").is_none());
+        assert!(text_position(&popup, "Done").is_none());
         assert!(text_position(&popup, "[E51] Image exceeds input limits").is_some());
     }
 
@@ -1978,7 +2085,7 @@ mod tests {
 
         render(Vec::new());
         let modal = render(Vec::new());
-        let heading = text_position(&modal, "Conversion complete").unwrap();
+        let heading = text_position(&modal, "Done").unwrap();
         let cross = modal
             .shapes
             .iter()
@@ -1993,7 +2100,7 @@ mod tests {
             .unwrap();
         assert!(cross.x > heading.x && cross.x > MAIN_WINDOW_SIZE.x / 2.0 + 150.0);
         assert!((cross.y - heading.y).abs() < 3.0);
-        assert!(text_position(&modal, "Done").is_none());
+        assert!(text_position(&modal, "Folder").is_none());
         render(click(cross));
         assert!(app.completed_summary.is_none());
     }
