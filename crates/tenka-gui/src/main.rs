@@ -3,17 +3,22 @@ mod comparison;
 mod estimate;
 mod file_drop;
 mod icons;
+mod image_info;
 mod jobs;
 mod language;
 mod summary;
 mod theme;
 mod updates;
+#[cfg(target_os = "linux")]
+mod window_icon;
+mod window_size;
 
 use std::{
     collections::HashSet,
     ffi::OsStr,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -27,17 +32,28 @@ use eframe::egui::{
     scroll_area::ScrollBarVisibility,
 };
 use estimate::{Estimate, InputSize};
-use file_drop::FileDrops;
+use file_drop::take_dropped_paths;
 use jobs::{Conversion, Event, Failure, InputFile, InputProbe, ScannedInputs};
 use language::Catalog;
 use summary::Summary;
 use tenka_core::{OptimizationMode, Options, OutputFormat};
+use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, ToolsPosition, WindowSize};
 
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
-const MAIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 650.0);
-const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
+const ACTION_GAP: f32 = 15.0;
+const DROP_AREA_SIDE_MARGIN: i8 = 20;
+const SELECTOR_WIDTH: f32 = 96.0;
+const APP_ID: &str = "io.github.yrmuq.tenka";
+const APP_ICON: &[u8] = include_bytes!("../../../assets/io.github.yrmuq.tenka.png");
+
+fn app_title(uppercase: bool) -> &'static str {
+    if uppercase { "TENKA" } else { "Tenka" }
+}
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "linux")]
+    window_icon::register_appimage_icon();
+
     let icon =
         eframe::icon_data::from_png_bytes(APP_ICON).expect("the embedded Tenka icon is valid PNG");
     let mut args = std::env::args_os().skip(1);
@@ -52,21 +68,21 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_app_id("io.github.yrmuq.tenka")
+            .with_app_id(APP_ID)
             .with_icon(icon),
         window_builder: Some(Box::new(|window| {
-            // Override the size and maximized state saved by resizable versions.
             window
                 .with_inner_size(MAIN_WINDOW_SIZE)
-                .with_min_inner_size(MAIN_WINDOW_SIZE)
-                .with_max_inner_size(MAIN_WINDOW_SIZE)
+                .with_min_inner_size(window_size::MIN_SIZE)
+                .with_resizable(true)
                 .with_maximized(false)
-                .with_maximize_button(false)
+                .with_fullscreen(false)
         })),
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native(
-        "Tenka",
+        app_title(false),
         options,
         Box::new(|context| Ok(Box::new(Tenka::new(context)))),
     )
@@ -109,9 +125,10 @@ struct Tenka {
     language: String,
     theme: ThemePreference,
     system_theme: theme::SystemTheme,
-    file_drops: FileDrops,
     catalog: Catalog,
     about: about::About,
+    image_info: image_info::ImageInfo,
+    window_size: WindowSize,
     queue: Vec<QueueEntry>,
     queue_jump: Option<usize>,
     scan_requests: Sender<Vec<PathBuf>>,
@@ -134,16 +151,23 @@ struct Tenka {
 
 impl Tenka {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
-        // Winit creates its Wayland decoration frame after applying startup size hints.
-        context
-            .egui_ctx
-            .send_viewport_cmd(egui::ViewportCommand::Resizable(false));
         let read = |key| context.storage.and_then(|storage| storage.get_string(key));
         let language = read("language")
             .filter(|value| value == "en")
             .unwrap_or_else(|| "system".into());
         let theme = parse_theme(read("theme").as_deref());
+        let format = read("output_format");
+        let format = OutputFormat::ALL
+            .into_iter()
+            .find(|item| Some(item.extension()) == format.as_deref())
+            .unwrap_or_default();
+        let mode = match read("optimization_mode").as_deref() {
+            Some("balance") => OptimizationMode::Balance,
+            Some("cheap") => OptimizationMode::Cheap,
+            _ => OptimizationMode::Best,
+        };
         context.egui_ctx.set_theme(theme);
+        theme::apply_light_text_contrast(&context.egui_ctx);
         for appearance in [egui::Theme::Light, egui::Theme::Dark] {
             context.egui_ctx.style_mut_of(appearance, |style| {
                 style.spacing.item_spacing = egui::vec2(10.0, 8.0);
@@ -170,10 +194,11 @@ impl Tenka {
         Self {
             catalog: Catalog::new(&language),
             about: about::About::default(),
+            image_info: image_info::ImageInfo::default(),
+            window_size: WindowSize::new(),
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
-            file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
             queue_jump: None,
             scan_requests,
@@ -182,8 +207,8 @@ impl Tenka {
             input_probes: jobs::probe_inputs(),
             file_column_fraction: 0.5,
             folder: None,
-            format: OutputFormat::default(),
-            mode: OptimizationMode::default(),
+            format,
+            mode,
             folder_failure: None,
             folder_request: None,
             worker: None,
@@ -199,18 +224,32 @@ impl Tenka {
         self.catalog.text(id)
     }
 
-    fn header(&mut self, context: &Context) {
-        egui::TopBottomPanel::top("navigation")
+    fn header(&mut self, ui: &mut Ui) {
+        let tools_position = self.window_size.tools_position();
+        egui::Panel::top("navigation")
             .frame(
-                egui::Frame::side_top_panel(&context.style())
+                egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 11)),
             )
-            .show(context, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(RichText::new("Tenka").strong().size(24.0));
-                    ui.add_space(12.0);
-                    if ui.button(self.label(109)).clicked() {
-                        self.open_comparison(&[]);
+            .show(ui, |ui| {
+                let center_x = ui.available_rect_before_wrap().center().x;
+                let tools_size = (tools_position == ToolsPosition::Center).then(|| {
+                    let font = egui::TextStyle::Button.resolve(ui.style());
+                    let label = ui.painter().layout_no_wrap(
+                        self.label(183).into(),
+                        font,
+                        ui.visuals().text_color(),
+                    );
+                    let padded = label.size() + 2.0 * ui.spacing().button_padding;
+                    padded.max(ui.spacing().interact_size)
+                });
+                let row = ui.horizontal(|ui| {
+                    ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                        self.quality_selector(ui);
+                        self.format_selector(ui);
+                    });
+                    if tools_position == ToolsPosition::Left {
+                        self.tools_menu(ui);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::about(ui, self.label(153)).clicked() {
@@ -224,7 +263,7 @@ impl Tenka {
                                 ThemePreference::Light => ThemePreference::Dark,
                                 ThemePreference::Dark => ThemePreference::System,
                             };
-                            self.system_theme.apply(context, self.theme);
+                            self.system_theme.apply(ui.ctx(), self.theme);
                         }
 
                         let language = if self.language == "en" {
@@ -242,26 +281,44 @@ impl Tenka {
                             .into();
                             self.catalog = Catalog::new(&self.language);
                         }
-                        ui.add_enabled_ui(self.worker.is_none(), |ui| {
-                            self.conversion_settings(ui);
-                        });
+                        if tools_position == ToolsPosition::Right {
+                            self.tools_menu(ui);
+                        }
                     });
                 });
+                if let Some(size) = tools_size {
+                    let center = egui::pos2(center_x, row.response.rect.center().y);
+                    let rect = Rect::from_center_size(center, size);
+                    ui.put(rect, |ui: &mut Ui| self.tools_menu(ui));
+                }
             });
     }
 
-    fn conversion_settings(&mut self, ui: &mut Ui) {
+    fn tools_menu(&mut self, ui: &mut Ui) -> egui::Response {
+        ui.menu_button(self.label(183), |ui| {
+            if ui.button(self.label(109)).clicked() {
+                ui.close();
+                self.open_comparison(&[]);
+            }
+        })
+        .response
+    }
+
+    fn format_selector(&mut self, ui: &mut Ui) {
         ComboBox::from_id_salt("output_format")
             .selected_text(self.format.name())
-            .width(96.0)
+            .width(SELECTOR_WIDTH)
             .show_ui(ui, |ui| {
+                theme::accent_selection(ui);
                 for format in OutputFormat::ALL {
                     ui.selectable_value(&mut self.format, format, format.name());
                 }
             })
             .response
             .on_hover_text(self.label(73));
+    }
 
+    fn quality_selector(&mut self, ui: &mut Ui) {
         let modes = [
             (OptimizationMode::Best, 111, 114),
             (OptimizationMode::Balance, 112, 115),
@@ -274,8 +331,9 @@ impl Tenka {
         };
         ComboBox::from_id_salt("mode")
             .selected_text(self.label(selected))
-            .width(96.0)
+            .width(SELECTOR_WIDTH)
             .show_ui(ui, |ui| {
+                theme::accent_selection(ui);
                 for (mode, label, hint) in modes {
                     let label = self.label(label);
                     let hint = self.label(hint);
@@ -294,15 +352,15 @@ impl Tenka {
             .count()
     }
 
-    fn footer(&mut self, context: &Context) {
+    fn footer(&mut self, ui: &mut Ui) {
         const FOOTER_HEIGHT: f32 = ADD_IMAGES_SIZE.y + 12.0;
-        egui::TopBottomPanel::bottom("queue_footer")
-            .exact_height(FOOTER_HEIGHT)
+        egui::Panel::bottom("queue_footer")
+            .exact_size(FOOTER_HEIGHT)
             .frame(
-                egui::Frame::side_top_panel(&context.style())
+                egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 0)),
             )
-            .show(context, |ui| {
+            .show(ui, |ui| {
                 let (strip, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), FOOTER_HEIGHT),
                     egui::Sense::hover(),
@@ -428,7 +486,7 @@ impl Tenka {
                     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
+                            egui::Role::Button,
                             true,
                             format!("{} · {}", file_name(path), self.error_summary(error)),
                         )
@@ -479,11 +537,8 @@ impl Tenka {
             })
             .on_hover_text(destination)
             .clicked()
-            && let Some(selected) = rfd::FileDialog::new().pick_folder()
         {
-            self.folder = Some(selected);
-            self.folder_failure = None;
-            ui.ctx().request_repaint();
+            self.pick_output_folder(ui.ctx());
         }
         if ui
             .put(center, |ui: &mut Ui| {
@@ -496,7 +551,8 @@ impl Tenka {
                 } else {
                     ui.add_enabled(
                         pending > 0 && self.scans_pending == 0,
-                        Button::new(self.label(22)),
+                        Button::new(RichText::new(self.label(22)).color(theme::ACCENT_TEXT))
+                            .fill(theme::CONVERT_ACCENT),
                     )
                 }
             })
@@ -504,7 +560,7 @@ impl Tenka {
         {
             if let Some(worker) = &self.worker {
                 worker.cancelled.store(true, Ordering::Relaxed);
-            } else {
+            } else if self.folder.is_some() || self.pick_output_folder(ui.ctx()) {
                 self.start_conversion(ui.ctx());
             }
         }
@@ -529,6 +585,7 @@ impl Tenka {
             self.folder_request = None;
             ui.ctx().request_repaint();
         }
+        ui.add_space((actions.bottom() + ACTION_GAP - ui.next_widget_position().y).max(0.0));
         if let Some(error) = &self.folder_failure {
             self.show_error(ui, error);
         }
@@ -548,66 +605,32 @@ impl Tenka {
         let Some(summary) = &self.completed_summary else {
             return;
         };
-        let response = egui::Modal::new(egui::Id::new("conversion_summary")).show(context, |ui| {
+        let id = egui::Id::unique("conversion_summary");
+        let section_gap = 6.0;
+        let response = egui::Modal::new(id).show(context, |ui| {
             ui.set_width(360.0);
-            ui.horizontal(|ui| {
-                ui.heading(self.label(135));
+            let header_x = ui.available_rect_before_wrap().x_range();
+            let header = ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::close(ui, self.label(142)).clicked() {
                         ui.close_kind(egui::UiKind::Modal);
                     }
                 });
             });
-            ui.add_space(6.0);
-            egui::Grid::new("summary_totals").show(ui, |ui| {
-                ui.label(self.label(136));
-                ui.horizontal(|ui| {
-                    ui.label(summary.attempted().to_string());
-                    icons::right_arrow(ui);
-                    ui.label(summary.converted.to_string());
-                });
-                ui.end_row();
-                ui.label(self.label(137));
-                ui.horizontal(|ui| {
-                    ui.label(self.catalog.file_size(summary.source_bytes));
-                    icons::right_arrow(ui);
-                    ui.label(self.catalog.file_size(summary.output_bytes));
-                });
-                ui.end_row();
-                if summary.source_bytes > 0 {
-                    let savings = summary.source_bytes.abs_diff(summary.output_bytes);
-                    let percent = (savings as f64 / summary.source_bytes as f64 * 100.0).round();
-                    let label = if summary.output_bytes > summary.source_bytes {
-                        139
-                    } else {
-                        138
-                    };
-                    ui.label(self.label(label));
-                    ui.strong(format!(
-                        "{} ({percent:.0}%)",
-                        self.catalog.file_size(savings)
-                    ));
-                    ui.end_row();
-                }
-                ui.label(self.label(140));
-                ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
-                ui.end_row();
-            });
-            let mut open_errors = false;
-            if summary.errors > 0 || summary.skipped > 0 {
-                ui.horizontal(|ui| {
-                    if summary.errors > 0 {
-                        let label = format!("{} · {}", self.label(124), summary.errors);
-                        open_errors = ui.button(label).clicked();
-                    }
-                    if summary.skipped > 0 {
-                        ui.weak(format!("{} · {}", self.label(141), summary.skipped));
-                    }
-                });
-            }
+            let title = egui::Label::new(RichText::new(self.label(135)).heading());
+            let title_area =
+                Rect::from_x_y_ranges(header_x.expand(-28.0), header.response.rect.y_range());
+            ui.place(title_area, title);
+            ui.add_space(section_gap);
+            self.show_completion_totals(ui, summary, id.with("table_width"));
+            let open_errors = summary.errors > 0
+                && ui
+                    .button(format!("{} · {}", self.label(124), summary.errors))
+                    .clicked();
             let open_folder = summary.folder().is_some_and(|_| {
-                ui.separator();
-                ui.vertical_centered(|ui| ui.button(self.label(143)))
+                ui.add_space(section_gap);
+                let size = egui::vec2(0.0, header.response.rect.height());
+                ui.vertical_centered(|ui| ui.add(Button::new(self.label(143)).min_size(size)))
                     .inner
                     .clicked()
             });
@@ -625,7 +648,118 @@ impl Tenka {
         }
     }
 
+    fn show_completion_totals(&self, ui: &mut Ui, summary: &Summary, width_id: egui::Id) {
+        const SPACING: egui::Vec2 = egui::vec2(16.0, 6.0);
+        let width = ui.data(|data| data.get_temp::<f32>(width_id).unwrap_or_default());
+        let inset = if width > 0.0 {
+            ((ui.available_width() - width) * 0.5).max(SPACING.x * 0.5)
+        } else {
+            SPACING.x * 0.5
+        };
+        let mut area = ui.available_rect_before_wrap();
+        area.min.x += inset;
+        let mut row_dividers = Vec::with_capacity(4);
+        let grid = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                egui::Grid::new("summary_totals")
+                    .num_columns(2)
+                    .spacing(SPACING)
+                    .show(ui, |ui| {
+                        let top = ui.cursor().top() - SPACING.y * 0.5;
+                        ui.label(self.label(136));
+                        let files = ui.horizontal(|ui| {
+                            ui.label(summary.attempted().to_string());
+                            icons::right_arrow(ui);
+                            ui.label(summary.converted.to_string());
+                        });
+                        ui.end_row();
+                        row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        ui.label(self.label(137));
+                        ui.horizontal(|ui| {
+                            ui.label(self.catalog.file_size(summary.source_bytes));
+                            icons::right_arrow(ui);
+                            ui.label(self.catalog.file_size(summary.output_bytes));
+                        });
+                        ui.end_row();
+                        row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        if summary.source_bytes > 0 {
+                            let savings = summary.source_bytes.abs_diff(summary.output_bytes);
+                            let percent =
+                                (savings as f64 / summary.source_bytes as f64 * 100.0).round();
+                            let label = if summary.output_bytes > summary.source_bytes {
+                                139
+                            } else {
+                                138
+                            };
+                            ui.label(self.label(label));
+                            ui.strong(format!(
+                                "{} ({percent:.0}%)",
+                                self.catalog.file_size(savings)
+                            ));
+                            ui.end_row();
+                            row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                        }
+                        ui.label(self.label(140));
+                        ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
+                        ui.end_row();
+                        if summary.skipped > 0 {
+                            row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                            ui.label(self.label(141));
+                            ui.label(summary.skipped.to_string());
+                            ui.end_row();
+                        }
+                        let bottom = ui.cursor().top() - SPACING.y * 0.5;
+                        (files.response.rect.left(), top..=bottom)
+                    })
+            })
+            .inner;
+        let body = grid.response.rect;
+        if (width - body.width()).abs() > 0.5 {
+            ui.data_mut(|data| data.insert_temp(width_id, body.width()));
+            ui.request_discard("measure completion table width");
+        }
+
+        let (values_x, rows) = grid.inner;
+        let border = Rect::from_x_y_ranges(body.x_range().expand(SPACING.x * 0.5), rows);
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter()
+            .rect_stroke(border, 0.0, stroke, egui::StrokeKind::Inside);
+        ui.painter()
+            .vline(values_x - SPACING.x * 0.5, border.y_range(), stroke);
+        for row in row_dividers {
+            ui.painter().hline(border.x_range(), row, stroke);
+        }
+    }
+
+    fn output_dialog_directory(&self) -> Option<&Path> {
+        self.folder.as_deref().or_else(|| {
+            self.queue
+                .first()?
+                .input
+                .path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+        })
+    }
+
+    fn pick_output_folder(&mut self, context: &Context) -> bool {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(directory) = self.output_dialog_directory() {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(folder) = dialog.pick_folder() else {
+            return false;
+        };
+        self.folder = Some(folder);
+        self.folder_failure = None;
+        context.request_repaint();
+        true
+    }
+
     fn start_conversion(&mut self, context: &Context) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
         self.folder_failure = None;
         let entries: Vec<_> = self
             .queue
@@ -641,7 +775,7 @@ impl Tenka {
             events: jobs::convert(
                 context,
                 entries,
-                self.folder.clone(),
+                Some(folder),
                 Options {
                     format: self.format,
                     auto_resize: false,
@@ -659,6 +793,7 @@ impl Tenka {
         const MIN_COLUMN_WIDTH: f32 = 100.0;
         const ROW_ACTION_SIZE: egui::Vec2 = egui::vec2(28.0, 28.0);
         const FOLDER_GAP: f32 = 6.0;
+        const INFO_GAP: f32 = 6.0;
 
         let content_height = HEADER_HEIGHT + ROW_HEIGHT * self.queue.len() as f32;
         let (bounds, _) = ui.allocate_exact_size(
@@ -674,29 +809,36 @@ impl Tenka {
         if scrolls {
             table.max.x -= scroll_style.allocated_width();
         }
-        let action_width = (table.width() * 0.1).max(3.0 * ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP);
+        let action_width = (table.width() * 0.1).max(2.0 * ROW_ACTION_SIZE.x);
         let output_end = table.width() - action_width;
         let min_width = MIN_COLUMN_WIDTH.min(output_end * 0.5);
         let file_width =
             (table.width() * self.file_column_fraction).clamp(min_width, output_end - min_width);
         let split = table.left() + file_width;
         let output_end_x = table.left() + output_end;
-        let output_start = split + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
-        let preview_start = output_end_x + ROW_ACTION_SIZE.x + 2.0 * FOLDER_GAP;
-        let preview_end = (preview_start + table.right()) * 0.5;
+        let preview_end = (output_end_x + table.right()) * 0.5;
         let column_rects = |row: Rect| {
             [
                 Rect::from_x_y_ranges(row.left()..=split, row.y_range()),
-                Rect::from_x_y_ranges(output_start..=output_end_x, row.y_range()),
-                Rect::from_x_y_ranges(preview_start..=preview_end, row.y_range()),
+                Rect::from_x_y_ranges(split..=output_end_x, row.y_range()),
+                Rect::from_x_y_ranges(output_end_x..=preview_end, row.y_range()),
                 Rect::from_x_y_ranges(preview_end..=table.right(), row.y_range()),
             ]
         };
-        let folder_rect = |boundary: f32, row: Rect| {
+        let folder_rect = |cell: Rect| {
             Rect::from_center_size(
                 egui::pos2(
-                    boundary + FOLDER_GAP + ROW_ACTION_SIZE.x * 0.5,
-                    row.center().y,
+                    cell.right() - FOLDER_GAP - ROW_ACTION_SIZE.x * 0.5,
+                    cell.center().y,
+                ),
+                ROW_ACTION_SIZE,
+            )
+        };
+        let info_rect = |cell: Rect| {
+            Rect::from_center_size(
+                egui::pos2(
+                    cell.left() + INFO_GAP + ROW_ACTION_SIZE.x * 0.5,
+                    cell.center().y,
                 ),
                 ROW_ACTION_SIZE,
             )
@@ -717,6 +859,7 @@ impl Tenka {
         let mut remove = None;
         let mut compare = None;
         let mut reveal_path = None;
+        let mut info_path = None;
         let jump = self.queue_jump.take();
         let scroll_bounds = Rect::from_min_max(body.min, bounds.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(scroll_bounds), |ui| {
@@ -754,7 +897,17 @@ impl Tenka {
                                 ui.painter()
                                     .rect_filled(row, 0, ui.visuals().faint_bg_color);
                             }
-                            let [file, output, preview, delete] = column_rects(row);
+                            let [mut file, mut output, preview, delete] = column_rects(row);
+                            let input_info = info_rect(file);
+                            if ui
+                                .put(input_info, |ui: &mut Ui| icons::about(ui, self.label(184)))
+                                .clicked()
+                            {
+                                info_path = Some(entry.input.path.clone());
+                            }
+                            let input_folder = folder_rect(file);
+                            file.min.x = input_info.right();
+                            file.max.x = input_folder.left();
                             queue_cell(ui, file, |ui| {
                                 let show_name = |ui: &mut Ui| {
                                     ui.add(
@@ -772,23 +925,37 @@ impl Tenka {
                                 }
                             });
                             if ui
-                                .put(folder_rect(split, row), |ui: &mut Ui| {
+                                .put(input_folder, |ui: &mut Ui| {
                                     icons::reveal_file(ui, self.label(134))
                                 })
                                 .clicked()
                             {
                                 reveal_path = Some(entry.input.path.clone());
                             }
-                            queue_cell(ui, output, |ui| {
-                                self.show_output(ui, &entry.status, &mut reveal_path);
-                            });
                             let conversion = match &entry.status {
                                 Status::Done(Ok(Some(result))) => Some(result),
                                 _ => None,
                             };
+                            let output_folder = folder_rect(output);
+                            if let Some(conversion) = conversion {
+                                let output_info = info_rect(output);
+                                if ui
+                                    .put(output_info, |ui: &mut Ui| {
+                                        icons::about(ui, self.label(184))
+                                    })
+                                    .clicked()
+                                {
+                                    info_path = Some(conversion.path.clone());
+                                }
+                                output.min.x = output_info.right();
+                                output.max.x = output_folder.left();
+                            }
+                            queue_cell(ui, output, |ui| {
+                                self.show_output(ui, &entry.status, &mut reveal_path);
+                            });
                             if let Some(conversion) = conversion
                                 && ui
-                                    .put(folder_rect(output_end_x, row), |ui: &mut Ui| {
+                                    .put(output_folder, |ui: &mut Ui| {
                                         icons::reveal_file(ui, self.label(70))
                                     })
                                     .clicked()
@@ -834,7 +1001,7 @@ impl Tenka {
                     egui::pos2(split, table.center().y),
                     egui::vec2(10.0, table.height()),
                 ),
-                ui.id().with("queue_column_divider"),
+                ui.scope_id().with("queue_column_divider"),
                 egui::Sense::drag(),
             )
             .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
@@ -857,6 +1024,9 @@ impl Tenka {
         }
         if let Some(paths) = compare {
             self.open_comparison(&paths);
+        }
+        if let Some(path) = info_path {
+            self.image_info.open(path);
         }
         if let Some(path) = reveal_path {
             self.folder_failure = None;
@@ -1043,6 +1213,11 @@ impl Tenka {
             Command::new(executable)
                 .args(["--compare", &self.language, theme_name(self.theme)])
                 .args(paths)
+                .env(
+                    comparison::TITLE_CASE_ENV,
+                    comparison::title_case_code(self.window_size.uppercase_title()),
+                )
+                .stdin(Stdio::piped())
                 .spawn()
         });
         match child {
@@ -1097,27 +1272,11 @@ impl Tenka {
 }
 
 impl eframe::App for Tenka {
-    fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
-        let size_change = context.input(|input| {
-            let window = input.viewport();
-            if window.fullscreen == Some(true) {
-                Some(egui::ViewportCommand::Fullscreen(false))
-            } else if window.maximized == Some(true) {
-                Some(egui::ViewportCommand::Maximized(false))
-            } else if window
-                .inner_rect
-                .is_some_and(|rect| (rect.size() - MAIN_WINDOW_SIZE).abs().max_elem() > 1.0)
-            {
-                Some(egui::ViewportCommand::InnerSize(MAIN_WINDOW_SIZE))
-            } else {
-                None
-            }
-        });
-        if let Some(command) = size_change {
-            context.send_viewport_cmd(command);
-        }
+    fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
+        let context = &ui.ctx().clone();
+        self.window_size.update(context);
         self.system_theme.apply(context, self.theme);
-        self.scan_paths(self.file_drops.take(context));
+        self.scan_paths(take_dropped_paths(context));
         self.poll_scans();
         self.poll_worker();
         if let Some(result) = self
@@ -1128,24 +1287,44 @@ impl eframe::App for Tenka {
             self.folder_failure = result.err();
             self.folder_request = None;
         }
-        self.header(context);
+        self.header(ui);
         if !self.queue.is_empty() {
-            self.footer(context);
+            self.footer(ui);
+        }
+        let mut margin = egui::Margin::symmetric(DROP_AREA_SIDE_MARGIN, ACTION_GAP as i8);
+        if self.queue.is_empty() {
+            margin.bottom = margin.left;
         }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::central_panel(&context.style())
-                    .inner_margin(egui::Margin::symmetric(20, 15)),
-            )
-            .show(context, |ui| self.show_convert(ui));
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(margin))
+            .show(ui, |ui| self.show_convert(ui));
         self.show_completion(context);
-        self.about.show(context, &self.catalog);
+        let previous_title = self.window_size.uppercase_title();
+        self.about
+            .show(context, &self.catalog, &mut self.window_size);
+        let uppercase = self.window_size.uppercase_title();
+        if uppercase != previous_title {
+            context.send_viewport_cmd(egui::ViewportCommand::Title(app_title(uppercase).into()));
+            for child in &mut self.comparison_windows {
+                if let Some(input) = &mut child.stdin {
+                    let _ = input.write_all(comparison::title_case_code(uppercase).as_bytes());
+                }
+            }
+        }
+        self.image_info.show(context, &self.catalog);
         self.poll_comparison_windows(context);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("language", self.language.clone());
         storage.set_string("theme", theme_name(self.theme).into());
+        storage.set_string("output_format", self.format.extension().into());
+        let mode = match self.mode {
+            OptimizationMode::Best => "best",
+            OptimizationMode::Balance => "balance",
+            OptimizationMode::Cheap => "cheap",
+        };
+        storage.set_string("optimization_mode", mode.into());
     }
 }
 
@@ -1202,7 +1381,7 @@ fn add_images_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response 
         enabled,
         Button::new(RichText::new("+").size(20.0)).min_size(ADD_IMAGES_SIZE),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -1230,7 +1409,7 @@ fn remove_file_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response
         ui.painter()
             .line_segment([center - offset, center + offset], stroke);
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -1250,7 +1429,7 @@ mod tests {
     use super::*;
     use egui::{Event as InputEvent, FullOutput, Modifiers, PointerButton, Pos2, RawInput, Shape};
 
-    fn click(pos: Pos2) -> Vec<InputEvent> {
+    pub(super) fn click(pos: Pos2) -> Vec<InputEvent> {
         let button = |pressed| InputEvent::PointerButton {
             pos,
             button: PointerButton::Primary,
@@ -1258,6 +1437,16 @@ mod tests {
             modifiers: Modifiers::NONE,
         };
         vec![InputEvent::PointerMoved(pos), button(true), button(false)]
+    }
+
+    pub(super) fn render_ui(
+        context: &Context,
+        input: RawInput,
+        draw: impl FnMut(&mut Ui),
+    ) -> FullOutput {
+        let mut output = context.run_ui(input, draw);
+        output.textures_delta.clear();
+        output
     }
 
     fn text_position(output: &FullOutput, label: &str) -> Option<Pos2> {
@@ -1271,7 +1460,75 @@ mod tests {
     }
 
     #[test]
-    fn the_information_button_after_the_theme_opens_about() {
+    fn conversion_choices_restore_on_startup_and_default_for_old_settings() {
+        use eframe::{App as _, Storage};
+
+        #[derive(Default)]
+        struct MemoryStorage(std::collections::HashMap<String, String>);
+
+        impl Storage for MemoryStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+
+            fn flush(&mut self) {}
+        }
+
+        let start = |storage: &dyn Storage| {
+            let mut creation = eframe::CreationContext::_new_kittest(Context::default());
+            creation.storage = Some(storage);
+            Tenka::new(&creation)
+        };
+        let mut storage = MemoryStorage::default();
+        storage.set_string("language", "en".into());
+        let mut app = start(&storage);
+        assert_eq!(app.mode, OptimizationMode::Best);
+        assert_eq!(app.format, OutputFormat::JpegXl);
+
+        app.mode = OptimizationMode::Cheap;
+        app.format = OutputFormat::Webp;
+        app.save(&mut storage);
+        let restarted = start(&storage);
+        assert_eq!(restarted.mode, OptimizationMode::Cheap);
+        assert_eq!(restarted.format, OutputFormat::Webp);
+        assert_eq!(restarted.language, "en");
+    }
+
+    #[test]
+    fn output_dialog_starts_at_the_first_remaining_file() {
+        let context = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(context));
+        assert_eq!(app.output_dialog_directory(), None);
+        app.add_inputs(
+            ["/test/first/a.jpg", "/test/second/b.png"]
+                .map(|path| InputFile::from(PathBuf::from(path))),
+        );
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/first"))
+        );
+        app.queue.remove(0);
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/second"))
+        );
+        app.folder = Some(PathBuf::from("/test/output"));
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/output"))
+        );
+    }
+
+    #[test]
+    fn about_opens_from_the_header_and_hides_window_settings_behind_the_logo() {
         use eframe::App as _;
 
         let ctx = Context::default();
@@ -1279,16 +1536,60 @@ mod tests {
         app.catalog = Catalog::new("en");
         app.theme = ThemePreference::System;
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
             )
         };
+        let check_toolbar = |frame: &FullOutput, position| {
+            let center = MAIN_WINDOW_SIZE.x * 0.5;
+            let quality = text_position(frame, "Best").unwrap().x;
+            let format = text_position(frame, "JPEG XL").unwrap().x;
+            let tools = text_position(frame, "Tools").unwrap().x;
+            assert!(quality < format && format < center);
+            match position {
+                ToolsPosition::Left => assert!(format < tools && tools < center),
+                ToolsPosition::Center => assert!((tools - center).abs() <= 1.0),
+                ToolsPosition::Right => {
+                    let globe = frame
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            Shape::Circle(circle) if circle.radius == 8.0 => Some(circle.center.x),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert!(tools > center && tools < globe && globe - tools < 70.0);
+                }
+            }
+        };
         let main = render(Vec::new());
+        assert!(text_position(&main, "Tenka").is_none());
+        check_toolbar(&main, ToolsPosition::Right);
+        let drop_area = main
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect)
+                    if rect.rect.width() > 700.0
+                        && rect.rect.height() > 300.0
+                        && rect.fill == egui::Color32::TRANSPARENT
+                        && !rect.stroke.is_empty() =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let margin = f32::from(DROP_AREA_SIDE_MARGIN);
+        assert!((drop_area.left() - margin).abs() <= 1.0);
+        assert!((MAIN_WINDOW_SIZE.x - drop_area.right() - margin).abs() <= 1.0);
+        assert!((MAIN_WINDOW_SIZE.y - drop_area.bottom() - margin).abs() <= 1.0);
         let info = main
             .shapes
             .iter()
@@ -1299,9 +1600,11 @@ mod tests {
             .unwrap();
         assert!(info.x > text_position(&main, "A").unwrap().x);
         render(click(info));
+        for _ in 0..3 {
+            render(Vec::new());
+        }
         let about = render(Vec::new());
         for label in [
-            "About",
             "Repository",
             "GitHub",
             "License",
@@ -1314,24 +1617,142 @@ mod tests {
         ] {
             assert!(text_position(&about, label).is_some(), "{label}");
         }
+        assert!(text_position(&about, "About").is_none());
+
+        let logo = about
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect.center()),
+                _ => None,
+            })
+            .unwrap();
+        for _ in 0..4 {
+            render(click(logo));
+            assert!(text_position(&render(Vec::new()), "Secret menu").is_none());
+        }
+        render(click(logo));
+        render(Vec::new());
+        let settings = render(Vec::new());
+        for label in [
+            "Secret menu",
+            "Width",
+            "Height",
+            "760",
+            "620",
+            "Use uppercase app title",
+            "Center Tools",
+            "Tools on the left",
+            "Reset",
+        ] {
+            assert!(text_position(&settings, label).is_some(), "{label}");
+        }
+        assert!(text_position(&settings, "Quality and format on the left").is_none());
+        for (option, position) in [
+            ("Center Tools", ToolsPosition::Center),
+            ("Tools on the left", ToolsPosition::Left),
+            ("Tools on the left", ToolsPosition::Right),
+            ("Tools on the left", ToolsPosition::Left),
+            ("Center Tools", ToolsPosition::Center),
+            ("Center Tools", ToolsPosition::Right),
+            ("Tools on the left", ToolsPosition::Left),
+        ] {
+            let frame = render(Vec::new());
+            render(click(text_position(&frame, option).unwrap()));
+            check_toolbar(&render(Vec::new()), position);
+        }
+        render(click(text_position(&settings, "760").unwrap()));
+        render(Vec::new());
+        render(vec![InputEvent::Text("1040".into())]);
+        let resized = render(vec![InputEvent::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(resized.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == egui::vec2(1040.0, 620.0))));
+
+        let unlock = text_position(&render(Vec::new()), "Unlock window resizing").unwrap();
+        let output = render(click(unlock));
+        assert!(
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(false)))
+        );
+
+        let title_toggle = text_position(&render(Vec::new()), "Use uppercase app title").unwrap();
+        let output = render(click(title_toggle));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Title(title) if title == "TENKA")));
+
+        let reset = text_position(&render(Vec::new()), "Reset").unwrap();
+        let output = render(click(reset));
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Resizable(true)))
+        );
+        assert!(commands.iter().any(|command| matches!(command, egui::ViewportCommand::InnerSize(size) if *size == MAIN_WINDOW_SIZE)));
+        assert!(commands.iter().any(
+            |command| matches!(command, egui::ViewportCommand::Title(title) if title == "Tenka")
+        ));
+
+        check_toolbar(&render(Vec::new()), ToolsPosition::Right);
+
+        render(click(Pos2::new(10.0, 10.0)));
+        assert!(text_position(&render(Vec::new()), "Secret menu").is_some());
+        let title_toggle = text_position(&render(Vec::new()), "Use uppercase app title").unwrap();
+        render(click(title_toggle));
+        render(vec![InputEvent::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        let about = render(Vec::new());
+        assert!(text_position(&about, "Repository").is_some());
+        assert!(text_position(&about, "TENKA").is_some());
     }
 
     #[test]
     fn the_add_menu_and_dropping_a_folder_work_in_the_conversion_window() {
         use eframe::App as _;
 
+        #[derive(Debug)]
+        struct FolderDrop(PathBuf);
+
+        impl egui::DroppedFile for FolderDrop {
+            fn path(&self) -> &Path {
+                &self.0
+            }
+
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                Err("This drop is a folder".into())
+            }
+        }
+
         let ctx = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         app.catalog = Catalog::new("en");
         let render = |app: &mut Tenka, events, dropped_files| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     dropped_files,
                     ..Default::default()
                 },
-                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
             )
         };
 
@@ -1349,10 +1770,7 @@ mod tests {
         render(
             &mut app,
             Vec::new(),
-            vec![egui::DroppedFile {
-                path: Some(folder.path().to_owned()),
-                ..Default::default()
-            }],
+            vec![Arc::new(FolderDrop(folder.path().to_owned()))],
         );
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while app.queue.is_empty() && std::time::Instant::now() < deadline {
@@ -1361,6 +1779,51 @@ mod tests {
         }
         assert_eq!(app.queue.len(), 1);
         assert_eq!(app.queue[0].input.path, input);
+    }
+
+    #[test]
+    fn queue_folder_icons_are_inside_the_file_and_output_columns() {
+        let ctx = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.queue.push(QueueEntry {
+            input: InputFile::from(PathBuf::from("source.jpg")),
+            size: Arc::new(OnceLock::new()),
+            status: Status::Done(Ok(Some(Conversion {
+                path: PathBuf::from("source.jxl"),
+                source_bytes: 2048,
+                bytes: 1024,
+            }))),
+        });
+        let rendered = render_ui(
+            &ctx,
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
+                ..Default::default()
+            },
+            |ui| app.show_queue(ui, false),
+        );
+        let mut folders = Vec::new();
+        let mut dividers = Vec::new();
+        for shape in &rendered.shapes {
+            match &shape.shape {
+                Shape::Path(path) if path.closed && path.points.len() == 6 => {
+                    folders.push(Rect::from_points(&path.points));
+                }
+                Shape::LineSegment { points: [a, b], .. }
+                    if a.x == b.x && (a.y - b.y).abs() >= 40.0 =>
+                {
+                    dividers.push(a.x);
+                }
+                _ => {}
+            }
+        }
+        folders.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        dividers.sort_by(f32::total_cmp);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(dividers.len(), 3);
+        assert!(folders[0].right() < dividers[0]);
+        assert!(folders[1].left() > dividers[0]);
+        assert!(folders[1].right() < dividers[1]);
     }
 
     #[test]
@@ -1383,15 +1846,16 @@ mod tests {
             })
             .collect();
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    app.footer(ctx);
-                    egui::CentralPanel::default().show(ctx, |ui| app.show_queue(ui, false));
+                |ui| {
+                    app.footer(ui);
+                    egui::CentralPanel::default().show(ui, |ui| app.show_queue(ui, false));
                 },
             )
         };
@@ -1494,35 +1958,78 @@ mod tests {
         assert_eq!(summary.folder(), Some(Path::new("/results")));
 
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    app.footer(ctx);
-                    app.show_completion(ctx);
+                |ui| {
+                    app.footer(ui);
+                    app.show_completion(ui.ctx());
                 },
             )
         };
         render(Vec::new());
         let modal = render(Vec::new());
         for label in [
-            "Conversion complete",
+            "Done",
+            "Files",
             "Sizes",
+            "Saved",
+            "Time",
             "3",
             "1",
             "2.0 KB",
             "1.0 KB",
             "1.0 KB (50%)",
             "1 min 5 s",
-            "Skipped · 1",
+            "Skipped",
         ] {
             assert!(text_position(&modal, label).is_some(), "{label}");
         }
-        let folder_button = text_position(&modal, "Open folder").unwrap();
-        assert!((folder_button.x - MAIN_WINDOW_SIZE.x / 2.0).abs() < 2.0);
+        let center = MAIN_WINDOW_SIZE.x * 0.5;
+        let folder = text_position(&modal, "Folder").unwrap();
+        let heading = text_position(&modal, "Done").unwrap();
+        assert!((folder.x - center).abs() < 2.0);
+        assert!((heading.x - center).abs() < 2.0);
+        let stats = text_position(&modal, "Sizes").unwrap();
+        let table = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect)
+                    if rect.fill == egui::Color32::TRANSPARENT
+                        && !rect.stroke.is_empty()
+                        && rect.rect.contains(stats) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!((table.center().x - center).abs() < 2.0, "{table:?}");
+        assert!(modal.shapes.iter().any(|shape| {
+            matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
+                if a.x == b.x && (a.y - table.top()).abs() < 1.0
+                    && (b.y - table.bottom()).abs() < 1.0)
+        }));
+        let button = modal
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.rect.width() < 100.0 && rect.rect.contains(folder) => {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(!modal.shapes.iter().any(|shape| {
+            matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
+                if a.y == b.y && a.y > table.bottom()
+                    && a.y < button.top() && b.x - a.x > 300.0)
+        }));
         let arrow_shafts = modal
             .shapes
             .iter()
@@ -1537,7 +2044,7 @@ mod tests {
         ));
         render(Vec::new());
         let popup = render(Vec::new());
-        assert!(text_position(&popup, "Conversion complete").is_none());
+        assert!(text_position(&popup, "Done").is_none());
         assert!(text_position(&popup, "[E51] Image exceeds input limits").is_some());
     }
 
@@ -1548,19 +2055,20 @@ mod tests {
         app.catalog = Catalog::new("en");
         app.completed_summary = Some(Summary::default());
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| app.show_completion(ctx),
+                |ui| app.show_completion(ui.ctx()),
             )
         };
 
         render(Vec::new());
         let modal = render(Vec::new());
-        let heading = text_position(&modal, "Conversion complete").unwrap();
+        let heading = text_position(&modal, "Done").unwrap();
         let cross = modal
             .shapes
             .iter()
@@ -1575,7 +2083,7 @@ mod tests {
             .unwrap();
         assert!(cross.x > heading.x && cross.x > MAIN_WINDOW_SIZE.x / 2.0 + 150.0);
         assert!((cross.y - heading.y).abs() < 3.0);
-        assert!(text_position(&modal, "Done").is_none());
+        assert!(text_position(&modal, "Folder").is_none());
         render(click(cross));
         assert!(app.completed_summary.is_none());
     }

@@ -25,7 +25,7 @@ const MAX_PIXELS: u64 = 36_000_000;
 const MAX_JPEG_XL_PIXELS: u64 = 80_000_000;
 const MAX_SIDE: u32 = 16_383;
 pub const DEFAULT_QUALITY: u8 = 90;
-const PERCEPTUAL_QUALITY: f64 = 80.0;
+const CHEAP_MIN_QUALITY: u8 = 88;
 const BLOCK_ERROR_PER_POINT: f64 = 0.4;
 const RESIZE_SCALES: [u32; 11] = [95, 90, 85, 80, 70, 60, 50, 40, 30, 20, 10];
 
@@ -118,7 +118,10 @@ impl OutputFormat {
             Self::JpegXl => ([0.4, 0.75, 1.25, 2.0, 3.0], [4.0, 5.0], Setting::Jxl),
             Self::Webp => ([98.0, 94.0, 82.0, 70.0, 55.0], [45.0, 35.0], Setting::Webp),
         };
-        let mut settings = Vec::with_capacity(if detailed { 11 } else { 5 });
+        let mut settings = Vec::with_capacity(if detailed { 13 } else { 5 });
+        if detailed && self == Self::JpegXl {
+            settings.extend([Setting::Jxl(0.15), Setting::Jxl(0.25)]);
+        }
         for (index, value) in values.into_iter().enumerate() {
             if detailed && index > 0 {
                 settings.push(setting(f32::midpoint(values[index - 1], value)));
@@ -253,6 +256,80 @@ pub fn decode_for_comparison(bytes: &[u8]) -> Result<RgbaImage> {
     }
 }
 
+/// Information obtained from an image's bytes, independent of its filename.
+pub struct ImageDetails {
+    pub format: Option<String>,
+    pub extensions: &'static [&'static str],
+    pub dimensions: Option<(u32, u32)>,
+    pub preview: Option<RgbaImage>,
+    pub exif: Vec<(String, String)>,
+}
+
+pub fn inspect_image(bytes: &[u8]) -> Result<ImageDetails> {
+    use std::io::Cursor;
+
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(Error::Limits);
+    }
+
+    let jxl = jpegxl_rs::utils::check_valid_signature(bytes) == Some(true);
+    let raster_format = image::guess_format(bytes).ok();
+    let mut details = ImageDetails {
+        format: None,
+        extensions: &[],
+        dimensions: None,
+        preview: None,
+        exif: Vec::new(),
+    };
+    let preview = if jxl {
+        details.format = Some(OutputFormat::JpegXl.name().into());
+        details.extensions = &["jxl"];
+        jxl_header::image_header(bytes, MAX_JPEG_XL_PIXELS)
+            .ok()
+            .and_then(|(dimensions, normalize)| {
+                details.dimensions = Some(dimensions);
+                decode_jxl(bytes, &parallel_runner(), normalize).ok()
+            })
+    } else if let Some(format) = raster_format {
+        details.format = Some(match format {
+            ImageFormat::Jpeg => "JPEG".into(),
+            ImageFormat::Png => "PNG".into(),
+            ImageFormat::WebP => "WebP".into(),
+            _ => format!("{format:?}"),
+        });
+        details.extensions = format.extensions_str();
+        details.dimensions = image::ImageReader::with_format(Cursor::new(bytes), format)
+            .into_dimensions()
+            .ok();
+        match raster::decode(bytes) {
+            Err(Error::Limits) if format == ImageFormat::Jpeg => {
+                raster::decode_large_jpeg(bytes).ok()
+            }
+            result => result.ok(),
+        }
+    } else {
+        None
+    };
+    if let Some(image) = preview {
+        details.dimensions = Some(image.dimensions());
+        details.preview = Some(raster::limit_size(&image, 384).into_owned());
+    }
+
+    let reader = exif::Reader::new();
+    let metadata = if jxl {
+        jxl_header::exif(bytes).and_then(|raw| reader.read_raw(raw).ok())
+    } else {
+        reader.read_from_container(&mut Cursor::new(bytes)).ok()
+    };
+    if let Some(metadata) = metadata {
+        details.exif.extend(metadata.fields().map(|field| {
+            let value = field.display_value().with_unit(&metadata).to_string();
+            (field.tag.to_string(), value.chars().take(512).collect())
+        }));
+    }
+    Ok(details)
+}
+
 /// Optimize encoded input, including reversible JPEG-to-JPEG XL transcoding.
 /// Returns the original display dimensions and the selected output, if any.
 pub fn optimize_for_conversion(
@@ -385,12 +462,12 @@ impl Source {
         reversible: Option<Output>,
     ) -> Result<Option<Output>> {
         let detailed = mode != OptimizationMode::Best;
+        let min_quality = match mode {
+            OptimizationMode::Cheap => CHEAP_MIN_QUALITY,
+            OptimizationMode::Best | OptimizationMode::Balance => DEFAULT_QUALITY,
+        };
         let mut search = Search {
-            min_quality: if detailed {
-                PERCEPTUAL_QUALITY
-            } else {
-                f64::from(DEFAULT_QUALITY)
-            },
+            min_quality: f64::from(min_quality),
             max_bytes: usize::MAX,
             detailed,
             exhaustive: false,
@@ -514,11 +591,7 @@ impl Source {
     ) -> Result<()> {
         search.check_cancelled()?;
         let lossless = options.format.lossless_setting();
-        let mut lossy = options.format.compression_settings(search.detailed);
-        let (width, height) = self.dimensions();
-        if search.detailed && raster::check_dimensions(width, height).is_err() {
-            lossy.splice(..0, [Setting::Jxl(0.15), Setting::Jxl(0.25)]);
-        }
+        let lossy = options.format.compression_settings(search.detailed);
         let reference = raster::QualityReference::new(&self.0);
         probe_compression(&self.0, &reference, search, &lossy, runner, &mut visit)?;
 
@@ -746,7 +819,7 @@ fn encode_reversible_jpeg(bytes: &[u8], dimensions: (u32, u32)) -> Result<Output
         .and_then(|mut encoder| encoder.encode_jpeg(bytes))
         .map_err(Error::JxlTranscode)?;
     Ok(Output {
-        bytes: encoded.data,
+        bytes: encoded,
         dimensions,
         quality: 100.0,
         setting: Setting::JxlReversible,
@@ -771,21 +844,54 @@ fn encode_jxl(
         })
         .maybe_parallel_runner(runner.as_ref().map(|runner| runner as &dyn ParallelRunner));
     let frame = EncoderFrame::new(image.as_raw()).num_channels(4);
-    let encoded = builder
+    builder
         .build()?
-        .encode_frame::<u8, u8>(&frame, image.width(), image.height())?;
-    Ok(encoded.data)
+        .encode_frame::<u8>(&frame, image.width(), image.height())
+        .map_err(Error::JxlEncode)
 }
 
 fn encode_webp(image: &RgbaImage, quality: Option<f32>) -> Result<Vec<u8>> {
-    let mut config = webp::WebPConfig::new().map_err(|_| Error::WebpConfig)?;
+    use libwebp_sys::{
+        WEBP_MAX_DIMENSION, WebPConfig, WebPEncode, WebPMemoryWrite, WebPMemoryWriter,
+        WebPMemoryWriterClear, WebPMemoryWriterInit, WebPPicture, WebPPictureFree,
+        WebPPictureImportRGBA,
+    };
+    use std::{mem::MaybeUninit, slice};
+
+    let (width, height) = image.dimensions();
+    if !(1..=WEBP_MAX_DIMENSION).contains(&width) || !(1..=WEBP_MAX_DIMENSION).contains(&height) {
+        return Err(Error::WebpEncode);
+    }
+    let mut config = WebPConfig::new().map_err(|()| Error::WebpConfig)?;
     config.lossless = i32::from(quality.is_none());
     config.quality = quality.unwrap_or(75.0);
     config.exact = 1;
-    let bytes = webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height())
-        .encode_advanced(&config)
-        .map_err(|_| Error::WebpEncode)?;
-    Ok(bytes.to_vec())
+    let mut picture = WebPPicture::new().map_err(|()| Error::WebpEncode)?;
+    picture.use_argb = 1;
+    picture.width = width as i32;
+    picture.height = height as i32;
+    let mut writer = MaybeUninit::<WebPMemoryWriter>::uninit();
+
+    // SAFETY: The RGBA image supplies width * height pixels with a checked stride. The
+    // initialized writer lives through the encode, and both C allocations are released
+    // after copying the result, including when import or encoding fails.
+    unsafe {
+        WebPMemoryWriterInit(writer.as_mut_ptr());
+        picture.writer = Some(WebPMemoryWrite);
+        picture.custom_ptr = writer.as_mut_ptr().cast();
+        let encoded =
+            WebPPictureImportRGBA(&mut picture, image.as_raw().as_ptr(), picture.width * 4) != 0
+                && WebPEncode(&config, &mut picture) != 0;
+        let mut writer = writer.assume_init();
+        let result = if encoded && !writer.mem.is_null() && writer.size != 0 {
+            Ok(slice::from_raw_parts(writer.mem, writer.size).to_vec())
+        } else {
+            Err(Error::WebpEncode)
+        };
+        WebPPictureFree(&mut picture);
+        WebPMemoryWriterClear(&mut writer);
+        result
+    }
 }
 
 fn decode_jxl(
@@ -812,6 +918,26 @@ fn decode_jxl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_details_read_exif_from_jpeg_and_report_its_signature() {
+        let tiff = b"II*\0\x08\0\0\0\x01\0\x0f\x01\x02\0\x04\0\0\0Cam\0\0\0\0\0";
+        let mut jpeg = b"\xff\xd8\xff\xe1".to_vec();
+        jpeg.extend_from_slice(&((tiff.len() as u16) + 8).to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(tiff);
+        jpeg.extend_from_slice(b"\xff\xd9");
+
+        let details = inspect_image(&jpeg).unwrap();
+        assert_eq!(details.format.as_deref(), Some("JPEG"));
+        assert!(details.extensions.contains(&"jpeg"));
+        assert!(
+            details
+                .exif
+                .iter()
+                .any(|(tag, value)| tag == "Make" && value.contains("Cam"))
+        );
+    }
 
     #[test]
     fn dimensions_are_available_from_a_png_header_without_image_data() {
@@ -846,6 +972,35 @@ mod tests {
         let cheap = economical_candidate(&candidates, OptimizationMode::Cheap).unwrap();
         assert_eq!((balance.quality, balance.bytes), (92.0, 512));
         assert_eq!((cheap.quality, cheap.bytes), (80.0, 256));
+    }
+
+    #[test]
+    fn cheap_keeps_subtle_texture_while_saving_space() {
+        let source = Source(RgbaImage::from_fn(256, 192, |x, y| {
+            let grain = (((x * 13) ^ (y * 37) ^ (x * y)) % 6) as u8;
+            image::Rgba([
+                28 + (x / 4) as u8 + grain,
+                45 + (y / 4) as u8 + grain,
+                75 + ((x + y) / 5) as u8 + grain,
+                255,
+            ])
+        }));
+        let options = Options::default();
+        let lossless = source.convert_with_quality(options, 100).unwrap();
+        let output = source
+            .optimize_with_mode(options, lossless.bytes.len() + 1, OptimizationMode::Cheap)
+            .unwrap()
+            .unwrap();
+
+        assert!(output.quality >= f64::from(CHEAP_MIN_QUALITY));
+        assert!(output.bytes.len() < lossless.bytes.len());
+        assert_eq!(output.dimensions, source.dimensions());
+        let local_error = raster::QualityReference::new(&source.0)
+            .compare(&output.preview().unwrap())
+            .unwrap()
+            .unwrap()
+            .max_block_error;
+        assert!(local_error <= 4.8);
     }
 
     #[test]

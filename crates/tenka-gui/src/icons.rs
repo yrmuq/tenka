@@ -1,6 +1,6 @@
 use eframe::egui::{
-    Align2, Atom, Button, Color32, FontId, Rect, Response, Sense, Shape, Stroke, ThemePreference,
-    Ui, Vec2, WidgetInfo, WidgetType, vec2,
+    Align2, Atom, Button, Color32, FontId, IdSalt, Rect, Response, Role, Sense, Shape, Stroke,
+    ThemePreference, Ui, Vec2, WidgetInfo, vec2,
 };
 
 pub(crate) const INFO_SIZE: Vec2 = vec2(16.0, 16.0);
@@ -187,7 +187,7 @@ pub(crate) fn reveal_file(ui: &mut Ui, label: &str) -> Response {
 
 pub(crate) fn output_folder(ui: &mut Ui, name: String, enabled: bool) -> Response {
     ui.add_enabled_ui(enabled, |ui| {
-        let arrow = ui.id().with("folder_arrow");
+        let arrow = IdSalt::new("folder_arrow");
         let button = Button::new((Atom::custom(arrow, vec2(10.0, 12.0)), name))
             .truncate()
             .atom_ui(ui);
@@ -211,6 +211,6 @@ fn icon_button(ui: &mut Ui, label: &str) -> Response {
             .min_size(vec2(28.0, 26.0))
             .frame_when_inactive(false),
     );
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, ui.is_enabled(), label));
     response.on_hover_text(label)
 }

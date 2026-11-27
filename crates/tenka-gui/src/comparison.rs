@@ -1,6 +1,7 @@
 use std::{
+    io::{self, Read},
     path::PathBuf,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::mpsc::{self, Receiver, TryRecvError},
 };
 
 use eframe::egui::{
@@ -10,14 +11,41 @@ use eframe::egui::{
 };
 
 use crate::{
-    ADD_IMAGES_SIZE, add_images_button, empty_drop_area,
-    file_drop::FileDrops,
+    ADD_IMAGES_SIZE, DROP_AREA_SIDE_MARGIN, add_images_button, app_title, empty_drop_area,
+    file_drop::take_dropped_paths,
     file_name,
     jobs::{self, ComparisonPixels, Failure},
     language::Catalog,
     path_label,
     theme::SystemTheme,
 };
+
+pub const TITLE_CASE_ENV: &str = "TENKA_COMPARE_UPPERCASE_TITLE";
+
+pub fn title_case_code(uppercase: bool) -> &'static str {
+    if uppercase { "1" } else { "0" }
+}
+
+fn window_title(catalog: &Catalog, uppercase: bool) -> String {
+    format!("{} — {}", app_title(uppercase), catalog.text(99))
+}
+
+fn listen_for_title_changes(context: &Context) -> Receiver<bool> {
+    let (send, receive) = mpsc::channel();
+    let context = context.clone();
+    std::thread::spawn(move || {
+        let mut input = io::stdin().lock();
+        let mut code = [0];
+        while input.read_exact(&mut code).is_ok() {
+            let uppercase = code[0] == b'1';
+            if send.send(uppercase).is_err() {
+                break;
+            }
+            context.request_repaint();
+        }
+    });
+    receive
+}
 
 pub fn run(
     icon: IconData,
@@ -26,7 +54,11 @@ pub fn run(
     paths: Vec<PathBuf>,
 ) -> eframe::Result {
     let catalog = Catalog::new(language);
-    let title = format!("Tenka — {}", catalog.text(99));
+    let title_case = std::env::var(TITLE_CASE_ENV).ok();
+    let title = window_title(
+        &catalog,
+        title_case.as_deref() == Some(title_case_code(true)),
+    );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("io.github.yrmuq.tenka.compare")
@@ -34,6 +66,7 @@ pub fn run(
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([320.0, 240.0])
             .with_maximized(true),
+        window_builder: Some(Box::new(|window| window.with_app_id(crate::APP_ID))),
         persist_window: false,
         ..Default::default()
     };
@@ -42,11 +75,12 @@ pub fn run(
         options,
         Box::new(move |creation| {
             creation.egui_ctx.set_theme(theme);
+            crate::theme::apply_light_text_contrast(&creation.egui_ctx);
             let mut comparison = Comparison {
                 catalog,
+                title_changes: title_case.map(|_| listen_for_title_changes(&creation.egui_ctx)),
                 theme,
                 system_theme: SystemTheme::new(&creation.egui_ctx),
-                file_drops: FileDrops::new(&creation.egui_ctx),
                 images: Vec::new(),
                 next: 0,
                 loading: None,
@@ -61,9 +95,9 @@ pub fn run(
 
 struct Comparison {
     catalog: Catalog,
+    title_changes: Option<Receiver<bool>>,
     theme: ThemePreference,
     system_theme: SystemTheme,
-    file_drops: FileDrops,
     images: Vec<Entry>,
     next: usize,
     loading: Option<Receiver<Result<ComparisonPixels, Failure>>>,
@@ -154,7 +188,11 @@ impl Comparison {
     fn show_images(&mut self, ui: &mut Ui) {
         let area = ui.max_rect();
         if self.images.is_empty() {
-            let drop_area = area.shrink2(vec2(20.0, 15.0));
+            let margin = f32::from(DROP_AREA_SIDE_MARGIN);
+            let drop_area = Rect::from_min_max(
+                area.min + vec2(margin, 15.0),
+                area.max - Vec2::splat(margin),
+            );
             if ui
                 .scope_builder(egui::UiBuilder::new().max_rect(drop_area), |ui| {
                     empty_drop_area(ui, self.catalog.text(11), self.catalog.text(8))
@@ -186,14 +224,14 @@ impl Comparison {
                 continue;
             };
             let (frame, size) = shared_frame.unwrap_or((region, *size));
-            let response = ui.interact(region, ui.id().with(index), Sense::drag());
+            let response = ui.interact(region, ui.scope_id().with(index), Sense::drag());
             let fitted = fit(size, frame.size());
             if response.dragged_by(PointerButton::Primary) {
                 self.camera.pan(response.drag_delta(), fitted);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if let Some(pointer) = response.hover_pos() {
-                let scroll = ui.input_mut(|input| std::mem::take(&mut input.raw_scroll_delta.y));
+                let scroll = ui.input(|input| input.smooth_scroll_delta().y);
                 if scroll != 0.0 {
                     self.camera
                         .zoom_at(scroll, pointer - frame.center(), fitted);
@@ -237,7 +275,7 @@ impl Comparison {
                         FontId::proportional(14.0),
                         ui.visuals().error_fg_color,
                     );
-                    ui.interact(region, ui.id().with(index), Sense::hover())
+                    ui.interact(region, ui.scope_id().with(index), Sense::hover())
                         .on_hover_text(&error.detail);
                 }
             }
@@ -261,17 +299,17 @@ impl Comparison {
         }
     }
 
-    fn show_captions(&self, context: &Context) {
+    fn show_captions(&self, ui: &mut Ui) {
         let count = self.images.len();
         if count == 0 {
             return;
         }
         let height = row_count(count) as f32 * 38.0;
-        let panel_height = height.min((context.available_rect().height() / 2.0).max(38.0));
-        egui::TopBottomPanel::bottom("comparison_captions")
-            .exact_height(panel_height)
-            .frame(egui::Frame::side_top_panel(&context.style()).inner_margin(0))
-            .show(context, |ui| {
+        let panel_height = height.min((ui.available_height() / 2.0).max(38.0));
+        egui::Panel::bottom("comparison_captions")
+            .exact_size(panel_height)
+            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
+            .show(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -293,10 +331,21 @@ impl Comparison {
 }
 
 impl eframe::App for Comparison {
-    fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
+        let context = &ui.ctx().clone();
+        if let Some(uppercase) = self
+            .title_changes
+            .as_ref()
+            .and_then(|changes| changes.try_iter().last())
+        {
+            context.send_viewport_cmd(egui::ViewportCommand::Title(window_title(
+                &self.catalog,
+                uppercase,
+            )));
+        }
         self.system_theme.apply(context, self.theme);
-        self.add(self.file_drops.take(context));
-        egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
+        self.add(take_dropped_paths(context));
+        egui::Panel::top("comparison_controls").show(ui, |ui| {
             let (controls, _) = ui.allocate_exact_size(
                 vec2(ui.available_width(), ADD_IMAGES_SIZE.y),
                 Sense::hover(),
@@ -321,10 +370,10 @@ impl eframe::App for Comparison {
             }
         });
         self.load_images(context);
-        self.show_captions(context);
+        self.show_captions(ui);
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&context.style()).inner_margin(0))
-            .show(context, |ui| self.show_images(ui));
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(0))
+            .show(ui, |ui| self.show_images(ui));
     }
 }
 

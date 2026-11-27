@@ -224,23 +224,47 @@ pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
 }
 
 pub fn reveal_file(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
-    file_manager_request(context, path, "ShowItems", 133)
+    desktop_request(context, path, 133, |path| {
+        show_in_file_manager(path, "ShowItems")
+    })
 }
 
 pub fn open_folder(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
-    file_manager_request(context, path, "ShowFolders", 71)
+    desktop_request(context, path, 71, |path| {
+        show_in_file_manager(path, "ShowFolders")
+    })
 }
 
-fn file_manager_request(
+pub fn open_image(context: &Context, path: PathBuf) -> Receiver<Result<(), Failure>> {
+    desktop_request(context, path, 200, |path| {
+        use std::process::{Command, Stdio};
+
+        let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+        let status = Command::new("xdg-open")
+            .arg(absolute)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(status.to_string())
+        }
+    })
+}
+
+fn desktop_request(
     context: &Context,
     path: PathBuf,
-    method: &'static str,
     label: u16,
+    open: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
 ) -> Receiver<Result<(), Failure>> {
     let context = context.clone();
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = show_in_file_manager(&path, method).map_err(|detail| Failure {
+        let result = open(&path).map_err(|detail| Failure {
             label,
             detail: format!("{}\n{detail}", path.display()),
         });
@@ -253,21 +277,24 @@ fn file_manager_request(
 
 #[cfg(target_os = "linux")]
 fn show_in_file_manager(path: &Path, method: &str) -> Result<(), String> {
-    use zbus::blocking::{Connection, Proxy};
+    use zbus::{Connection, Proxy, block_on};
 
     let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
     let uri = url::Url::from_file_path(absolute)
         .map_err(|()| "The file path could not be converted to a URI".to_owned())?;
     let uris = [uri.as_str()];
-    let connection = Connection::session().map_err(|error| error.to_string())?;
-    Proxy::new(
-        &connection,
-        "org.freedesktop.FileManager1",
-        "/org/freedesktop/FileManager1",
-        "org.freedesktop.FileManager1",
-    )
-    .and_then(|proxy| proxy.call(method, &(uris.as_slice(), "")))
-    .map_err(|error| error.to_string())
+    let result: zbus::Result<()> = block_on(async {
+        let connection = Connection::session().await?;
+        let proxy = Proxy::new(
+            &connection,
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+        )
+        .await?;
+        proxy.call(method, &(uris.as_slice(), "")).await
+    });
+    result.map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -439,7 +466,7 @@ fn create_output_subfolder(root: &Path, relative: &Path) -> Result<PathBuf, Fail
     Ok(folder)
 }
 
-fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
+pub(crate) fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
     let result = (|| {
         if !fs::metadata(path)?.is_file() {
             return Err(io::Error::new(

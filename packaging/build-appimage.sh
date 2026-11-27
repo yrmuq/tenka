@@ -6,6 +6,7 @@ dist="$PWD/dist"
 mkdir -p "$dist"
 appdir="$(mktemp -d "$dist/.appimage.XXXXXX")"
 trap 'rm -rf "$appdir"' EXIT
+app_root="$appdir/Tenka.AppDir"
 
 source packaging/appimage-pins.env
 tool_url="https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_TAG/appimagetool-x86_64.AppImage"
@@ -19,12 +20,26 @@ curl --retry 3 --fail --silent --show-error --location "$runtime_url" --output "
 )
 chmod +x "$appdir/appimagetool"
 
-install -D target/release/tenka "$appdir/Tenka.AppDir/usr/bin/tenka"
-install -D -m 644 LICENSE "$appdir/Tenka.AppDir/usr/share/doc/tenka/LICENSE"
+binary="$app_root/usr/bin/tenka"
+notices="$app_root/usr/share/doc/tenka"
+install -D target/release/tenka "$binary"
+install -D -m 644 LICENSE "$notices/LICENSE"
 cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu |
-    python3 packaging/collect-notices.py > "$appdir/Tenka.AppDir/usr/share/doc/tenka/THIRD_PARTY_NOTICES"
-install -m 644 packaging/io.github.yrmuq.tenka.{desktop,png} "$appdir/Tenka.AppDir/"
-ln -s usr/bin/tenka "$appdir/Tenka.AppDir/AppRun"
+    python3 packaging/collect-notices.py > "$notices/THIRD_PARTY_NOTICES"
+
+xkb="$app_root/usr/lib/libxkbcommon-x11.so.0"
+install -D -m 644 /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0 "$xkb"
+for library in libxkbcommon.so.0 libxcb-xkb.so.1; do
+    install -D -m 644 "/usr/lib/x86_64-linux-gnu/$library" "$app_root/usr/lib/xkb/$library"
+done
+install -m 644 /usr/share/doc/libxkbcommon-x11-0/copyright "$notices/libxkbcommon-COPYRIGHT"
+install -m 644 /usr/share/doc/libxcb-xkb1/copyright "$notices/libxcb-COPYRIGHT"
+# Keep the private XKB dependencies discoverable through the X11 module.
+patchelf --set-rpath '$ORIGIN/../lib' "$binary"
+patchelf --set-rpath '$ORIGIN/xkb' "$xkb"
+
+install -m 644 packaging/io.github.yrmuq.tenka.desktop assets/io.github.yrmuq.tenka.png "$app_root/"
+ln -s usr/bin/tenka "$app_root/AppRun"
 
 asset=Tenka-x86_64.AppImage
 update="gh-releases-zsync|yrmuq|tenka|latest|$asset.zsync"
@@ -38,7 +53,7 @@ esac
 export ARCH=x86_64
 cd "$appdir"
 "$appdir/appimagetool" --appimage-extract-and-run --runtime-file "$appdir/runtime" \
-    "${options[@]}" "$appdir/Tenka.AppDir" "$asset"
+    "${options[@]}" "$app_root" "$asset"
 
 if [[ "${TENKA_CHANNEL:-dev}" == stable ]]; then
     test -s "$asset.zsync"

@@ -18,5 +18,5 @@
 
 ## Compatibility Workarounds
 
-- Handle native Wayland file drops through the existing clipboard data device while eframe uses Winit 0.30, since compositors can route drops to only one device per seat.
-- Lock the main window after creation as well as setting its size limits at startup, since Winit 0.30's fallback Wayland decorations are created after the size hints and initially allow resizing.
+- Apply the main window resize constraints after creation, since Winit 0.30's fallback Wayland decorations are created after the startup size hints.
+- Keep the packaged desktop ID and Wayland window IDs identical so the compositor can look up the icon while Winit lacks support for setting a native Wayland window icon.
