@@ -483,11 +483,8 @@ impl Tenka {
             })
             .on_hover_text(destination)
             .clicked()
-            && let Some(selected) = rfd::FileDialog::new().pick_folder()
         {
-            self.folder = Some(selected);
-            self.folder_failure = None;
-            ui.ctx().request_repaint();
+            self.pick_output_folder(ui.ctx());
         }
         if ui
             .put(center, |ui: &mut Ui| {
@@ -509,7 +506,7 @@ impl Tenka {
         {
             if let Some(worker) = &self.worker {
                 worker.cancelled.store(true, Ordering::Relaxed);
-            } else {
+            } else if self.folder.is_some() || self.pick_output_folder(ui.ctx()) {
                 self.start_conversion(ui.ctx());
             }
         }
@@ -632,7 +629,35 @@ impl Tenka {
         }
     }
 
+    fn output_dialog_directory(&self) -> Option<&Path> {
+        self.folder.as_deref().or_else(|| {
+            self.queue
+                .first()?
+                .input
+                .path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+        })
+    }
+
+    fn pick_output_folder(&mut self, context: &Context) -> bool {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(directory) = self.output_dialog_directory() {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(folder) = dialog.pick_folder() else {
+            return false;
+        };
+        self.folder = Some(folder);
+        self.folder_failure = None;
+        context.request_repaint();
+        true
+    }
+
     fn start_conversion(&mut self, context: &Context) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
         self.folder_failure = None;
         let entries: Vec<_> = self
             .queue
@@ -648,7 +673,7 @@ impl Tenka {
             events: jobs::convert(
                 context,
                 entries,
-                self.folder.clone(),
+                Some(folder),
                 Options {
                     format: self.format,
                     auto_resize: false,
@@ -1289,7 +1314,11 @@ mod tests {
         vec![InputEvent::PointerMoved(pos), button(true), button(false)]
     }
 
-    fn render_ui(context: &Context, input: RawInput, draw: impl FnMut(&mut Ui)) -> FullOutput {
+    pub(super) fn render_ui(
+        context: &Context,
+        input: RawInput,
+        draw: impl FnMut(&mut Ui),
+    ) -> FullOutput {
         let mut output = context.run_ui(input, draw);
         output.textures_delta.clear();
         output
@@ -1303,6 +1332,31 @@ mod tests {
             let center = text.pos + text.galley.rect.center().to_vec2();
             (text.galley.text() == label && shape.clip_rect.contains(center)).then_some(center)
         })
+    }
+
+    #[test]
+    fn output_dialog_starts_at_the_first_remaining_file() {
+        let context = Context::default();
+        let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(context));
+        assert_eq!(app.output_dialog_directory(), None);
+        app.add_inputs(
+            ["/test/first/a.jpg", "/test/second/b.png"]
+                .map(|path| InputFile::from(PathBuf::from(path))),
+        );
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/first"))
+        );
+        app.queue.remove(0);
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/second"))
+        );
+        app.folder = Some(PathBuf::from("/test/output"));
+        assert_eq!(
+            app.output_dialog_directory(),
+            Some(Path::new("/test/output"))
+        );
     }
 
     #[test]

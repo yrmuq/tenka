@@ -217,24 +217,42 @@ fn components() -> &'static [Component] {
 }
 
 fn show_components(ui: &mut Ui, catalog: &Catalog) {
-    egui::Grid::new("about_components")
-        .num_columns(3)
-        .min_col_width(120.0)
-        .max_col_width(350.0)
-        .spacing(egui::vec2(18.0, 9.0))
-        .striped(true)
-        .show(ui, |ui| {
-            for id in [166, 167, 168] {
-                ui.strong(catalog.text(id));
-            }
-            ui.end_row();
-            for component in components() {
-                ui.label(component.name);
-                ui.hyperlink_to(component.upstream, component.url);
-                ui.label(catalog.translate(component.details));
+    let width_id = ui.make_persistent_id("about_components_width");
+    let width = ui
+        .data(|data| data.get_temp::<f32>(width_id))
+        .unwrap_or(0.0);
+    let inset = if width > 0.0 {
+        ((ui.available_width() - width) * 0.5).max(0.0)
+    } else {
+        0.0
+    };
+    let grid = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(inset);
+        egui::Grid::new("about_components")
+            .num_columns(3)
+            .min_col_width(120.0)
+            .max_col_width(350.0)
+            .spacing(egui::vec2(18.0, 9.0))
+            .striped(true)
+            .show(ui, |ui| {
+                for id in [166, 167, 168] {
+                    ui.strong(catalog.text(id));
+                }
                 ui.end_row();
-            }
-        });
+                for component in components() {
+                    ui.label(component.name);
+                    ui.hyperlink_to(component.upstream, component.url);
+                    ui.label(catalog.translate(component.details));
+                    ui.end_row();
+                }
+            })
+    });
+    let measured_width = grid.inner.response.rect.width();
+    if (width - measured_width).abs() > 0.5 {
+        ui.data_mut(|data| data.insert_temp(width_id, measured_width));
+        ui.ctx().request_repaint();
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +271,45 @@ mod tests {
         let russian = Catalog::new("ru");
         assert_eq!(russian.translate("JPEG XL codec."), "Кодек JPEG XL.");
         assert!(rows.iter().any(|row| row.name == "SSIMULACRA2"));
+    }
+
+    #[test]
+    fn the_attribution_table_is_centered_in_about() {
+        let context = Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, crate::MAIN_WINDOW_SIZE);
+        let catalog = Catalog::new("en");
+        let mut window = WindowSize::new();
+        let mut about = About::default();
+        about.open();
+        let mut render = || {
+            crate::tests::render_ui(
+                &context,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| about.show(ui.ctx(), &catalog, &mut window),
+            )
+        };
+        for _ in 0..3 {
+            render();
+        }
+        let output = render();
+        let stripe = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.width() > 360.0 && (15.0..50.0).contains(&rect.rect.height()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            (stripe.center().x - screen.center().x).abs() <= 1.0,
+            "{stripe:?}"
+        );
     }
 }

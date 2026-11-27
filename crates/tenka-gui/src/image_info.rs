@@ -75,8 +75,10 @@ impl ImageInfo {
             self.pending = Some((path.to_owned(), load_details(context, path.to_owned())));
         }
 
+        let available_height = context.content_rect().height() - 40.0;
         let dialog = egui::Modal::new(egui::Id::unique("image_details")).show(context, |ui| {
             ui.set_width(470.0);
+            let top = ui.next_widget_position().y;
             ui.horizontal(|ui| {
                 ui.heading(catalog.text(184));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -85,22 +87,37 @@ impl ImageInfo {
                     }
                 });
             });
-            let height = (context.content_rect().height() - 115.0).max(100.0);
-            egui::ScrollArea::vertical()
-                .id_salt(path)
-                .max_height(height)
-                .show(ui, |ui| match &self.details {
-                    Some(Ok(details)) => {
-                        show_details(ui, catalog, path, details, self.preview.as_ref());
-                    }
-                    Some(Err(error)) => show_error(ui, catalog, error),
-                    None => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(catalog.text(195));
+            match &self.details {
+                Some(Ok(details)) => {
+                    show_properties(
+                        ui,
+                        catalog,
+                        path,
+                        details,
+                        self.preview.as_ref(),
+                        (available_height - 265.0).clamp(60.0, 225.0),
+                    );
+                    ui.separator();
+                    let exif_height =
+                        (available_height - (ui.next_widget_position().y - top) - 30.0).max(48.0);
+                    egui::CollapsingHeader::new(catalog.text(191))
+                        .id_salt(path)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(exif_height)
+                                .show(ui, |ui| {
+                                    show_exif(ui, catalog, details.image.as_ref().ok());
+                                });
                         });
-                    }
-                });
+                }
+                Some(Err(error)) => show_error(ui, catalog, error),
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(catalog.text(195));
+                    });
+                }
+            }
         });
         if dialog.should_close() {
             self.path = None;
@@ -135,16 +152,21 @@ fn load_details(context: &Context, path: PathBuf) -> Receiver<DetailsResult> {
     receive
 }
 
-fn show_details(
+fn show_properties(
     ui: &mut Ui,
     catalog: &Catalog,
     path: &Path,
     details: &FileDetails,
     preview: Option<&TextureHandle>,
+    preview_height: f32,
 ) {
     ui.vertical_centered(|ui| {
         if let Some(preview) = preview {
-            ui.add(egui::Image::new(preview).max_height(225.0).max_width(410.0));
+            ui.add(
+                egui::Image::new(preview)
+                    .max_height(preview_height)
+                    .max_width(410.0),
+            );
         } else {
             ui.weak(catalog.text(193));
         }
@@ -165,7 +187,8 @@ fn show_details(
         .max_col_width(320.0)
         .show(ui, |ui| {
             ui.strong(catalog.text(185));
-            ui.label(file_name(path)).on_hover_text(path_label(path));
+            ui.add(egui::Label::new(file_name(path)).truncate())
+                .on_hover_text(path_label(path));
             ui.end_row();
             for (label, value) in [
                 (186, Some(size)),
@@ -193,9 +216,9 @@ fn show_details(
     if let Err(error) = &details.image {
         show_error(ui, catalog, error);
     }
+}
 
-    ui.separator();
-    ui.heading(catalog.text(191));
+fn show_exif(ui: &mut Ui, catalog: &Catalog, image: Option<&ImageDetails>) {
     if let Some(image) = image.filter(|image| !image.exif.is_empty()) {
         egui::Grid::new("image_exif")
             .num_columns(2)
@@ -236,4 +259,66 @@ fn show_error(ui: &mut Ui, catalog: &Catalog, error: &Failure) {
         format!("[E{}] {}", error.label, catalog.text(error.label)),
     )
     .on_hover_text(&error.detail);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_and_last_file_date_are_visible_before_expanding_exif() {
+        let context = Context::default();
+        let catalog = Catalog::new("en");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut card = ImageInfo {
+            path: Some(file.path().to_owned()),
+            details: Some(Ok(FileDetails {
+                metadata: file.as_file().metadata().unwrap(),
+                image: Ok(ImageDetails {
+                    format: Some("JPEG".into()),
+                    extensions: &["jpg", "jpeg"],
+                    dimensions: Some((384, 384)),
+                    preview: None,
+                    exif: vec![("Camera model".into(), "Example camera".into())],
+                }),
+            })),
+            preview: Some(context.load_texture(
+                "test_preview",
+                ColorImage::filled([384, 384], egui::Color32::WHITE),
+                TextureOptions::LINEAR,
+            )),
+            ..Default::default()
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, crate::MAIN_WINDOW_SIZE);
+        let mut render = || {
+            crate::tests::render_ui(
+                &context,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| card.show(ui.ctx(), &catalog),
+            )
+        };
+        render();
+        let output = render();
+        let visible = |label: &str| {
+            output.shapes.iter().any(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    let center = text.pos + text.galley.rect.center().to_vec2();
+                    shape.clip_rect.contains(center) && screen.contains(center)
+                }
+                _ => false,
+            })
+        };
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Rect(rect) if rect.brush.is_some()
+                && rect.rect.height() >= 200.0 && screen.contains_rect(rect.rect)
+        )));
+        assert!(visible("Created"));
+        assert!(visible("Modified"));
+        assert!(visible("EXIF data"));
+        assert!(!visible("Camera model"));
+    }
 }
