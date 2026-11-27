@@ -44,7 +44,7 @@ jobs:
               .head.repo.full_name == $repo and (.head.ref | startswith("dependabot/")) and
               .head.sha == $head and .base.ref == "deps"
             '
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.head }}
           fetch-depth: 0
