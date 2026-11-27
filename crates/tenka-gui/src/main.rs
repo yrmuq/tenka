@@ -2048,7 +2048,10 @@ mod tests {
             .unwrap();
         let gap_above = button.top() - divider;
         let gap_below = frame.bottom() - button.bottom();
-        assert!((gap_above - gap_below).abs() < 2.0, "{gap_above} vs {gap_below}");
+        assert!(
+            (gap_above - gap_below).abs() < 2.0,
+            "{gap_above} vs {gap_below}"
+        );
         let arrow_shafts = modal
             .shapes
             .iter()
