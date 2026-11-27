@@ -30,6 +30,8 @@ Tenka is a Linux image optimizer. It automatically selects compression to save s
 <details>
 <summary><h2>Controls &amp; Shortcuts</h2></summary>
 
+On Wayland, use **+** to add files or folders in either window.
+
 | Input | Action |
 | --- | --- |
 | Drop files or folders, or select **+** | Add source images to the conversion queue. A folder import includes supported images in its subfolders. |
@@ -90,7 +92,7 @@ Tenka is distributed under the [GNU General Public License, version 3](LICENSE).
 | Component | Upstream | License | Integration Details |
 | --- | --- | --- | --- |
 | egui / eframe | [emilk/egui](https://github.com/emilk/egui) | `MIT OR Apache-2.0` | Desktop interface. |
-| Smithay Clipboard | [Smithay/smithay-clipboard](https://github.com/Smithay/smithay-clipboard) | `MIT` | Wayland clipboard and incoming file drops. |
+| Smithay Clipboard | [Smithay/smithay-clipboard](https://github.com/Smithay/smithay-clipboard) | `MIT` | Wayland clipboard. |
 | jpegxl-rs | [inflation/jpegxl-rs](https://github.com/inflation/jpegxl-rs) | `GPL-3.0-or-later` | Rust bindings for JPEG XL. |
 | libjxl | [libjxl/libjxl](https://github.com/libjxl/libjxl) | `BSD-3-Clause` | JPEG XL codec. |
 | libwebp | [webmproject/libwebp](https://github.com/webmproject/libwebp) | `BSD-3-Clause` | WebP encoder for conversion and comparison. |

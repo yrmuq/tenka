@@ -27,7 +27,7 @@ use eframe::egui::{
     scroll_area::ScrollBarVisibility,
 };
 use estimate::{Estimate, InputSize};
-use file_drop::FileDrops;
+use file_drop::take_dropped_paths;
 use jobs::{Conversion, Event, Failure, InputFile, InputProbe, ScannedInputs};
 use language::Catalog;
 use summary::Summary;
@@ -109,7 +109,6 @@ struct Tenka {
     language: String,
     theme: ThemePreference,
     system_theme: theme::SystemTheme,
-    file_drops: FileDrops,
     catalog: Catalog,
     about: about::About,
     queue: Vec<QueueEntry>,
@@ -173,7 +172,6 @@ impl Tenka {
             language,
             theme,
             system_theme: theme::SystemTheme::new(&context.egui_ctx),
-            file_drops: FileDrops::new(&context.egui_ctx),
             queue: Vec::new(),
             queue_jump: None,
             scan_requests,
@@ -1117,7 +1115,7 @@ impl eframe::App for Tenka {
             context.send_viewport_cmd(command);
         }
         self.system_theme.apply(context, self.theme);
-        self.scan_paths(self.file_drops.take(context));
+        self.scan_paths(take_dropped_paths(context));
         self.poll_scans();
         self.poll_worker();
         if let Some(result) = self
