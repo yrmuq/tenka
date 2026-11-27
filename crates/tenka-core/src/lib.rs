@@ -778,14 +778,47 @@ fn encode_jxl(
 }
 
 fn encode_webp(image: &RgbaImage, quality: Option<f32>) -> Result<Vec<u8>> {
-    let mut config = webp::WebPConfig::new().map_err(|_| Error::WebpConfig)?;
+    use libwebp_sys::{
+        WEBP_MAX_DIMENSION, WebPConfig, WebPEncode, WebPMemoryWrite, WebPMemoryWriter,
+        WebPMemoryWriterClear, WebPMemoryWriterInit, WebPPicture, WebPPictureFree,
+        WebPPictureImportRGBA,
+    };
+    use std::{mem::MaybeUninit, slice};
+
+    let (width, height) = image.dimensions();
+    if !(1..=WEBP_MAX_DIMENSION).contains(&width) || !(1..=WEBP_MAX_DIMENSION).contains(&height) {
+        return Err(Error::WebpEncode);
+    }
+    let mut config = WebPConfig::new().map_err(|()| Error::WebpConfig)?;
     config.lossless = i32::from(quality.is_none());
     config.quality = quality.unwrap_or(75.0);
     config.exact = 1;
-    let bytes = webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height())
-        .encode_advanced(&config)
-        .map_err(|_| Error::WebpEncode)?;
-    Ok(bytes.to_vec())
+    let mut picture = WebPPicture::new().map_err(|()| Error::WebpEncode)?;
+    picture.use_argb = 1;
+    picture.width = width as i32;
+    picture.height = height as i32;
+    let mut writer = MaybeUninit::<WebPMemoryWriter>::uninit();
+
+    // SAFETY: The RGBA image supplies width * height pixels with a checked stride. The
+    // initialized writer lives through the encode, and both C allocations are released
+    // after copying the result, including when import or encoding fails.
+    unsafe {
+        WebPMemoryWriterInit(writer.as_mut_ptr());
+        picture.writer = Some(WebPMemoryWrite);
+        picture.custom_ptr = writer.as_mut_ptr().cast();
+        let encoded =
+            WebPPictureImportRGBA(&mut picture, image.as_raw().as_ptr(), picture.width * 4) != 0
+                && WebPEncode(&config, &mut picture) != 0;
+        let mut writer = writer.assume_init();
+        let result = if encoded && !writer.mem.is_null() && writer.size != 0 {
+            Ok(slice::from_raw_parts(writer.mem, writer.size).to_vec())
+        } else {
+            Err(Error::WebpEncode)
+        };
+        WebPPictureFree(&mut picture);
+        WebPMemoryWriterClear(&mut writer);
+        result
+    }
 }
 
 fn decode_jxl(

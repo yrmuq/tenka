@@ -11,6 +11,6 @@ imagesize = { version = "0.15", default-features = false, features = ["jpeg", "p
 jpegxl-rs = { version = "0.16", features = ["vendored"] }
 jpegxl-sys = "0.13"
 ssimulacra2 = "0.5.1"
-webp = { version = "0.3.1", default-features = false }
+libwebp-sys = "0.14.4"
 thiserror = "2"
 moxcms = "0.8"

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "persistence", "wayland", "x11"] }
 rfd = "0.15"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -15,5 +15,6 @@ tenka-core = { path = "../tenka-core" }
 ureq = { version = "3", default-features = false, features = ["json", "platform-verifier", "rustls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-lite = "2"
 url = "2"
-zbus = "5"
+zbus = "6"

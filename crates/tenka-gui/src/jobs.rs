@@ -253,21 +253,24 @@ fn file_manager_request(
 
 #[cfg(target_os = "linux")]
 fn show_in_file_manager(path: &Path, method: &str) -> Result<(), String> {
-    use zbus::blocking::{Connection, Proxy};
+    use zbus::{Connection, Proxy, block_on};
 
     let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
     let uri = url::Url::from_file_path(absolute)
         .map_err(|()| "The file path could not be converted to a URI".to_owned())?;
     let uris = [uri.as_str()];
-    let connection = Connection::session().map_err(|error| error.to_string())?;
-    Proxy::new(
-        &connection,
-        "org.freedesktop.FileManager1",
-        "/org/freedesktop/FileManager1",
-        "org.freedesktop.FileManager1",
-    )
-    .and_then(|proxy| proxy.call(method, &(uris.as_slice(), "")))
-    .map_err(|error| error.to_string())
+    let result: zbus::Result<()> = block_on(async {
+        let connection = Connection::session().await?;
+        let proxy = Proxy::new(
+            &connection,
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+        )
+        .await?;
+        proxy.call(method, &(uris.as_slice(), "")).await
+    });
+    result.map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]

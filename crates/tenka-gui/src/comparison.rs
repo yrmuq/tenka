@@ -184,14 +184,14 @@ impl Comparison {
                 continue;
             };
             let (frame, size) = shared_frame.unwrap_or((region, *size));
-            let response = ui.interact(region, ui.id().with(index), Sense::drag());
+            let response = ui.interact(region, ui.scope_id().with(index), Sense::drag());
             let fitted = fit(size, frame.size());
             if response.dragged_by(PointerButton::Primary) {
                 self.camera.pan(response.drag_delta(), fitted);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if let Some(pointer) = response.hover_pos() {
-                let scroll = ui.input_mut(|input| std::mem::take(&mut input.raw_scroll_delta.y));
+                let scroll = ui.input(|input| input.smooth_scroll_delta().y);
                 if scroll != 0.0 {
                     self.camera
                         .zoom_at(scroll, pointer - frame.center(), fitted);
@@ -235,7 +235,7 @@ impl Comparison {
                         FontId::proportional(14.0),
                         ui.visuals().error_fg_color,
                     );
-                    ui.interact(region, ui.id().with(index), Sense::hover())
+                    ui.interact(region, ui.scope_id().with(index), Sense::hover())
                         .on_hover_text(&error.detail);
                 }
             }
@@ -259,17 +259,17 @@ impl Comparison {
         }
     }
 
-    fn show_captions(&self, context: &Context) {
+    fn show_captions(&self, ui: &mut Ui) {
         let count = self.images.len();
         if count == 0 {
             return;
         }
         let height = row_count(count) as f32 * 38.0;
-        let panel_height = height.min((context.available_rect().height() / 2.0).max(38.0));
-        egui::TopBottomPanel::bottom("comparison_captions")
-            .exact_height(panel_height)
-            .frame(egui::Frame::side_top_panel(&context.style()).inner_margin(0))
-            .show(context, |ui| {
+        let panel_height = height.min((ui.available_height() / 2.0).max(38.0));
+        egui::Panel::bottom("comparison_captions")
+            .exact_size(panel_height)
+            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
+            .show(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -291,10 +291,11 @@ impl Comparison {
 }
 
 impl eframe::App for Comparison {
-    fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
+        let context = &ui.ctx().clone();
         self.system_theme.apply(context, self.theme);
         self.add(take_dropped_paths(context));
-        egui::TopBottomPanel::top("comparison_controls").show(context, |ui| {
+        egui::Panel::top("comparison_controls").show(ui, |ui| {
             let (controls, _) = ui.allocate_exact_size(
                 vec2(ui.available_width(), ADD_IMAGES_SIZE.y),
                 Sense::hover(),
@@ -319,10 +320,10 @@ impl eframe::App for Comparison {
             }
         });
         self.load_images(context);
-        self.show_captions(context);
+        self.show_captions(ui);
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&context.style()).inner_margin(0))
-            .show(context, |ui| self.show_images(ui));
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(0))
+            .show(ui, |ui| self.show_images(ui));
     }
 }
 

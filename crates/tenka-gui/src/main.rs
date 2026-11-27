@@ -197,13 +197,13 @@ impl Tenka {
         self.catalog.text(id)
     }
 
-    fn header(&mut self, context: &Context) {
-        egui::TopBottomPanel::top("navigation")
+    fn header(&mut self, ui: &mut Ui) {
+        egui::Panel::top("navigation")
             .frame(
-                egui::Frame::side_top_panel(&context.style())
+                egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 11)),
             )
-            .show(context, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Tenka").strong().size(24.0));
                     ui.add_space(12.0);
@@ -222,7 +222,7 @@ impl Tenka {
                                 ThemePreference::Light => ThemePreference::Dark,
                                 ThemePreference::Dark => ThemePreference::System,
                             };
-                            self.system_theme.apply(context, self.theme);
+                            self.system_theme.apply(ui.ctx(), self.theme);
                         }
 
                         let language = if self.language == "en" {
@@ -292,15 +292,15 @@ impl Tenka {
             .count()
     }
 
-    fn footer(&mut self, context: &Context) {
+    fn footer(&mut self, ui: &mut Ui) {
         const FOOTER_HEIGHT: f32 = ADD_IMAGES_SIZE.y + 12.0;
-        egui::TopBottomPanel::bottom("queue_footer")
-            .exact_height(FOOTER_HEIGHT)
+        egui::Panel::bottom("queue_footer")
+            .exact_size(FOOTER_HEIGHT)
             .frame(
-                egui::Frame::side_top_panel(&context.style())
+                egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 0)),
             )
-            .show(context, |ui| {
+            .show(ui, |ui| {
                 let (strip, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), FOOTER_HEIGHT),
                     egui::Sense::hover(),
@@ -426,7 +426,7 @@ impl Tenka {
                     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
+                            egui::Role::Button,
                             true,
                             format!("{} · {}", file_name(path), self.error_summary(error)),
                         )
@@ -546,7 +546,8 @@ impl Tenka {
         let Some(summary) = &self.completed_summary else {
             return;
         };
-        let response = egui::Modal::new(egui::Id::new("conversion_summary")).show(context, |ui| {
+        let id = egui::Id::unique("conversion_summary");
+        let response = egui::Modal::new(id).show(context, |ui| {
             ui.set_width(360.0);
             ui.horizontal(|ui| {
                 ui.heading(self.label(135));
@@ -832,7 +833,7 @@ impl Tenka {
                     egui::pos2(split, table.center().y),
                     egui::vec2(10.0, table.height()),
                 ),
-                ui.id().with("queue_column_divider"),
+                ui.scope_id().with("queue_column_divider"),
                 egui::Sense::drag(),
             )
             .on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
@@ -1095,7 +1096,8 @@ impl Tenka {
 }
 
 impl eframe::App for Tenka {
-    fn update(&mut self, context: &Context, _: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
+        let context = &ui.ctx().clone();
         let size_change = context.input(|input| {
             let window = input.viewport();
             if window.fullscreen == Some(true) {
@@ -1126,16 +1128,16 @@ impl eframe::App for Tenka {
             self.folder_failure = result.err();
             self.folder_request = None;
         }
-        self.header(context);
+        self.header(ui);
         if !self.queue.is_empty() {
-            self.footer(context);
+            self.footer(ui);
         }
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::central_panel(&context.style())
+                egui::Frame::central_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 15)),
             )
-            .show(context, |ui| self.show_convert(ui));
+            .show(ui, |ui| self.show_convert(ui));
         self.show_completion(context);
         self.about.show(context, &self.catalog);
         self.poll_comparison_windows(context);
@@ -1200,7 +1202,7 @@ fn add_images_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response 
         enabled,
         Button::new(RichText::new("+").size(20.0)).min_size(ADD_IMAGES_SIZE),
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -1228,7 +1230,7 @@ fn remove_file_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response
         ui.painter()
             .line_segment([center - offset, center + offset], stroke);
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.on_hover_text(label)
 }
 
@@ -1258,6 +1260,12 @@ mod tests {
         vec![InputEvent::PointerMoved(pos), button(true), button(false)]
     }
 
+    fn render_ui(context: &Context, input: RawInput, draw: impl FnMut(&mut Ui)) -> FullOutput {
+        let mut output = context.run_ui(input, draw);
+        output.textures_delta.clear();
+        output
+    }
+
     fn text_position(output: &FullOutput, label: &str) -> Option<Pos2> {
         output.shapes.iter().find_map(|shape| {
             let Shape::Text(text) = &shape.shape else {
@@ -1277,13 +1285,14 @@ mod tests {
         app.catalog = Catalog::new("en");
         app.theme = ThemePreference::System;
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
             )
         };
         let main = render(Vec::new());
@@ -1318,18 +1327,32 @@ mod tests {
     fn the_add_menu_and_dropping_a_folder_work_in_the_conversion_window() {
         use eframe::App as _;
 
+        #[derive(Debug)]
+        struct FolderDrop(PathBuf);
+
+        impl egui::DroppedFile for FolderDrop {
+            fn path(&self) -> &Path {
+                &self.0
+            }
+
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                Err("This drop is a folder".into())
+            }
+        }
+
         let ctx = Context::default();
         let mut app = Tenka::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         app.catalog = Catalog::new("en");
         let render = |app: &mut Tenka, events, dropped_files| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     dropped_files,
                     ..Default::default()
                 },
-                |ctx| app.update(ctx, &mut eframe::Frame::_new_kittest()),
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
             )
         };
 
@@ -1347,10 +1370,7 @@ mod tests {
         render(
             &mut app,
             Vec::new(),
-            vec![egui::DroppedFile {
-                path: Some(folder.path().to_owned()),
-                ..Default::default()
-            }],
+            vec![Arc::new(FolderDrop(folder.path().to_owned()))],
         );
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while app.queue.is_empty() && std::time::Instant::now() < deadline {
@@ -1381,15 +1401,16 @@ mod tests {
             })
             .collect();
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    app.footer(ctx);
-                    egui::CentralPanel::default().show(ctx, |ui| app.show_queue(ui, false));
+                |ui| {
+                    app.footer(ui);
+                    egui::CentralPanel::default().show(ui, |ui| app.show_queue(ui, false));
                 },
             )
         };
@@ -1492,15 +1513,16 @@ mod tests {
         assert_eq!(summary.folder(), Some(Path::new("/results")));
 
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    app.footer(ctx);
-                    app.show_completion(ctx);
+                |ui| {
+                    app.footer(ui);
+                    app.show_completion(ui.ctx());
                 },
             )
         };
@@ -1546,13 +1568,14 @@ mod tests {
         app.catalog = Catalog::new("en");
         app.completed_summary = Some(Summary::default());
         let mut render = |events| {
-            ctx.run(
+            render_ui(
+                &ctx,
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, MAIN_WINDOW_SIZE)),
                     events,
                     ..Default::default()
                 },
-                |ctx| app.show_completion(ctx),
+                |ui| app.show_completion(ui.ctx()),
             )
         };
 

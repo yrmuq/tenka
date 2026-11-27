@@ -57,7 +57,7 @@ impl About {
             context.load_texture("tenka_logo", pixels, TextureOptions::LINEAR)
         });
         let checking = self.request.is_some();
-        let response = egui::Modal::new(egui::Id::new("about_tenka")).show(context, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("about_tenka")).show(context, |ui| {
             ui.set_width(688.0);
             ui.horizontal(|ui| {
                 ui.heading(catalog.text(153));
