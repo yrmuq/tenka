@@ -147,12 +147,21 @@ impl About {
             };
             let table_left = area.left() + inset;
             let upstream = layout.upstream.max(MIN_COLUMN_WIDTH + COLUMN_SPACING);
+            let title_left = table_left + upstream;
+            let mut title_font = egui::TextStyle::Heading.resolve(ui.style());
+            title_font.size *= 2.0;
+            let title =
+                ui.painter()
+                    .layout_no_wrap("Tenka".into(), title_font, ui.visuals().text_color());
+            let spacing = ui.spacing().item_spacing;
+            let project_left =
+                (area.center().x + spacing.x * 0.5).max(title_left + title.size().x + spacing.x);
+            let row_height = ui.text_style_height(&egui::TextStyle::Body);
+            let project_top = area.top() + (logo.anchor.y - 1.5 * row_height - spacing.y).max(0.0);
             let project_area =
-                egui::Rect::from_min_max(egui::pos2(table_left + upstream, area.top()), area.max);
+                egui::Rect::from_min_max(egui::pos2(project_left, project_top), area.max);
             let (check_for_updates, license_y) = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(project_area), |ui| {
-                    let title_size = egui::TextStyle::Heading.resolve(ui.style()).size * 2.0;
-                    ui.heading(egui::RichText::new("Tenka").size(title_size));
                     ui.horizontal(|ui| {
                         ui.label(catalog.text(154));
                         ui.hyperlink_to("GitHub", REPOSITORY);
@@ -161,7 +170,7 @@ impl About {
                         ui.label(catalog.text(155));
                         ui.hyperlink_to(env!("CARGO_PKG_LICENSE"), LICENSE);
                     });
-                    let check = ui.horizontal(|ui| {
+                    let check = ui.horizontal_wrapped(|ui| {
                         ui.label(catalog.text(156));
                         ui.label(env!("CARGO_PKG_VERSION"));
                         ui.add_enabled(!checking, egui::Button::new(catalog.text(157)))
@@ -171,6 +180,11 @@ impl About {
                     (check.inner, license.response.rect.center().y)
                 })
                 .inner;
+            let title_rect = egui::Rect::from_min_size(
+                egui::pos2(title_left, license_y - title.size().y * 0.5),
+                title.size(),
+            );
+            ui.put(title_rect, egui::Label::new(title));
             // The striped rows extend two points beyond the first column.
             let logo_rect = egui::Rect::from_min_size(
                 egui::pos2(table_left - 2.0, license_y) - logo.anchor,
@@ -381,7 +395,14 @@ mod tests {
         };
         let logo_anchor = logo.min + about.logo.as_ref().unwrap().anchor;
         assert!((logo_anchor.x - stripe.left()).abs() <= 1.0);
-        assert!((text_rect("Tenka").left() - text_rect("Upstream").left()).abs() <= 1.0);
-        assert!((text_rect("License").center().y - logo_anchor.y).abs() <= 1.0);
+        let title = text_rect("Tenka");
+        assert!((title.left() - text_rect("Upstream").left()).abs() <= 1.0);
+        let license = text_rect("License");
+        assert!((license.center().y - logo_anchor.y).abs() <= 1.0);
+        for label in ["Repository", "License", "Version"] {
+            let label_rect = text_rect(label);
+            assert!(label_rect.left() > title.right());
+            assert!((label_rect.left() - license.left()).abs() <= 1.0);
+        }
     }
 }
