@@ -606,9 +606,8 @@ impl Tenka {
             return;
         };
         let id = egui::Id::unique("conversion_summary");
-        let frame = egui::Frame::popup(&context.style_of(context.theme()));
-        let footer_gap = f32::from(frame.inner_margin.bottom) + frame.stroke.width;
-        let response = egui::Modal::new(id).frame(frame).show(context, |ui| {
+        let section_gap = 6.0;
+        let response = egui::Modal::new(id).show(context, |ui| {
             ui.set_width(360.0);
             let header_x = ui.available_rect_before_wrap().x_range();
             let header = ui.horizontal(|ui| {
@@ -622,15 +621,16 @@ impl Tenka {
             let title_area =
                 Rect::from_x_y_ranges(header_x.expand(-28.0), header.response.rect.y_range());
             ui.place(title_area, title);
-            ui.add_space(6.0);
+            ui.add_space(section_gap);
             self.show_completion_totals(ui, summary, id.with("table_width"));
             let open_errors = summary.errors > 0
                 && ui
                     .button(format!("{} · {}", self.label(124), summary.errors))
                     .clicked();
             let open_folder = summary.folder().is_some_and(|_| {
-                ui.add_space(footer_gap);
-                ui.vertical_centered(|ui| ui.button(self.label(143)))
+                ui.add_space(section_gap);
+                let size = egui::vec2(0.0, header.response.rect.height());
+                ui.vertical_centered(|ui| ui.add(Button::new(self.label(143)).min_size(size)))
                     .inner
                     .clicked()
             });
