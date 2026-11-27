@@ -41,6 +41,8 @@ impl Settings {
 pub struct WindowSize {
     settings: Settings,
     uppercase_title: bool,
+    conversion_left: bool,
+    tools_centered: bool,
     last_inner_size: Option<egui::Vec2>,
     resize_pending: bool,
     starting: bool,
@@ -51,6 +53,8 @@ impl WindowSize {
         Self {
             settings: Settings::default(),
             uppercase_title: false,
+            conversion_left: false,
+            tools_centered: false,
             last_inner_size: None,
             resize_pending: false,
             starting: true,
@@ -59,6 +63,14 @@ impl WindowSize {
 
     pub fn uppercase_title(&self) -> bool {
         self.uppercase_title
+    }
+
+    pub fn conversion_left(&self) -> bool {
+        self.conversion_left
+    }
+
+    pub fn tools_centered(&self) -> bool {
+        self.tools_centered
     }
 
     fn apply(&mut self, context: &Context) {
@@ -159,9 +171,13 @@ impl WindowSize {
                     ui.end_row();
                 });
                 ui.checkbox(&mut self.uppercase_title, catalog.text(201));
+                ui.checkbox(&mut self.conversion_left, catalog.text(202));
+                ui.checkbox(&mut self.tools_centered, catalog.text(203));
                 if ui.button(catalog.text(182)).clicked() {
                     self.settings = Settings::default();
                     self.uppercase_title = false;
+                    self.conversion_left = false;
+                    self.tools_centered = false;
                 }
             });
         if previous != self.settings {

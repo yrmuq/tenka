@@ -42,6 +42,7 @@ use window_size::{DEFAULT_SIZE as MAIN_WINDOW_SIZE, WindowSize};
 const ADD_IMAGES_SIZE: egui::Vec2 = egui::vec2(34.0, 30.0);
 const ACTION_GAP: f32 = 15.0;
 const DROP_AREA_SIDE_MARGIN: i8 = 20;
+const SELECTOR_WIDTH: f32 = 96.0;
 const APP_ID: &str = "io.github.yrmuq.tenka";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/io.github.yrmuq.tenka.png");
 
@@ -224,20 +225,43 @@ impl Tenka {
     }
 
     fn header(&mut self, ui: &mut Ui) {
+        let conversion_left = self.window_size.conversion_left();
+        let tools_centered = self.window_size.tools_centered();
         egui::Panel::top("navigation")
             .frame(
                 egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 11)),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.menu_button(self.label(183), |ui| {
-                        if ui.button(self.label(109)).clicked() {
-                            ui.close();
-                            self.open_comparison(&[]);
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let center_x = ui.available_rect_before_wrap().center().x;
+                let tools_size = tools_centered.then(|| {
+                    let font = egui::TextStyle::Button.resolve(ui.style());
+                    let label = ui.painter().layout_no_wrap(
+                        self.label(183).into(),
+                        font,
+                        ui.visuals().text_color(),
+                    );
+                    let padded = label.size() + 2.0 * ui.spacing().button_padding;
+                    padded.max(ui.spacing().interact_size)
+                });
+                let row = ui.horizontal(|ui| {
+                    if conversion_left {
+                        ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                            self.quality_selector(ui, SELECTOR_WIDTH);
+                            self.format_selector(ui, SELECTOR_WIDTH);
+                        });
+                    }
+                    if !tools_centered {
+                        self.tools_menu(ui);
+                    }
+                    let mut right = ui.available_rect_before_wrap();
+                    if let Some(size) = tools_size {
+                        let reserved = center_x + size.x * 0.5 + ui.spacing().item_spacing.x;
+                        right.min.x = right.left().max(reserved);
+                    }
+                    let layout = egui::Layout::right_to_left(egui::Align::Center);
+                    let builder = egui::UiBuilder::new().max_rect(right).layout(layout);
+                    ui.scope_builder(builder, |ui| {
                         if icons::about(ui, self.label(153)).clicked() {
                             self.about.open();
                         }
@@ -267,18 +291,39 @@ impl Tenka {
                             .into();
                             self.catalog = Catalog::new(&self.language);
                         }
-                        ui.add_enabled_ui(self.worker.is_none(), |ui| {
-                            self.conversion_settings(ui);
-                        });
+                        if !conversion_left {
+                            let available = ui.available_width() - ui.spacing().item_spacing.x;
+                            let width = (available * 0.5).clamp(0.0, SELECTOR_WIDTH);
+                            ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                                self.format_selector(ui, width);
+                                self.quality_selector(ui, width);
+                            });
+                        }
                     });
                 });
+                if let Some(size) = tools_size {
+                    let center = egui::pos2(center_x, row.response.rect.center().y);
+                    let rect = Rect::from_center_size(center, size);
+                    ui.put(rect, |ui: &mut Ui| self.tools_menu(ui));
+                }
             });
     }
 
-    fn conversion_settings(&mut self, ui: &mut Ui) {
+    fn tools_menu(&mut self, ui: &mut Ui) -> egui::Response {
+        ui.menu_button(self.label(183), |ui| {
+            if ui.button(self.label(109)).clicked() {
+                ui.close();
+                self.open_comparison(&[]);
+            }
+        })
+        .response
+    }
+
+    fn format_selector(&mut self, ui: &mut Ui, width: f32) {
         ComboBox::from_id_salt("output_format")
             .selected_text(self.format.name())
-            .width(96.0)
+            .width(width)
+            .truncate()
             .show_ui(ui, |ui| {
                 theme::accent_selection(ui);
                 for format in OutputFormat::ALL {
@@ -287,7 +332,9 @@ impl Tenka {
             })
             .response
             .on_hover_text(self.label(73));
+    }
 
+    fn quality_selector(&mut self, ui: &mut Ui, width: f32) {
         let modes = [
             (OptimizationMode::Best, 111, 114),
             (OptimizationMode::Balance, 112, 115),
@@ -300,7 +347,8 @@ impl Tenka {
         };
         ComboBox::from_id_salt("mode")
             .selected_text(self.label(selected))
-            .width(96.0)
+            .width(width)
+            .truncate()
             .show_ui(ui, |ui| {
                 theme::accent_selection(ui);
                 for (mode, label, hint) in modes {
@@ -1540,9 +1588,34 @@ mod tests {
             "760",
             "620",
             "Use uppercase app title",
+            "Quality and format on the left",
+            "Center Tools",
             "Reset",
         ] {
             assert!(text_position(&settings, label).is_some(), "{label}");
+        }
+        let center = MAIN_WINDOW_SIZE.x * 0.5;
+        for (option, conversion_left, tools_centered) in [
+            ("Quality and format on the left", true, false),
+            ("Quality and format on the left", false, false),
+            ("Center Tools", false, true),
+            ("Quality and format on the left", true, true),
+        ] {
+            let frame = render(Vec::new());
+            render(click(text_position(&frame, option).unwrap()));
+            let frame = render(Vec::new());
+            let tools = text_position(&frame, "Tools").unwrap().x;
+            let quality = text_position(&frame, "Best").unwrap().x;
+            let format = text_position(&frame, "JPEG XL").unwrap().x;
+            assert!(quality < format);
+            assert_eq!(format < center, conversion_left);
+            if tools_centered {
+                assert!((tools - center).abs() <= 1.0, "{option}: {tools}");
+            } else if conversion_left {
+                assert!(format < tools);
+            } else {
+                assert!(tools < 60.0);
+            }
         }
         render(click(text_position(&settings, "760").unwrap()));
         render(Vec::new());
@@ -1587,6 +1660,10 @@ mod tests {
         assert!(commands.iter().any(
             |command| matches!(command, egui::ViewportCommand::Title(title) if title == "Tenka")
         ));
+
+        let reset_header = render(Vec::new());
+        assert!(text_position(&reset_header, "Tools").unwrap().x < 60.0);
+        assert!(text_position(&reset_header, "Best").unwrap().x > center);
 
         render(click(Pos2::new(10.0, 10.0)));
         assert!(text_position(&render(Vec::new()), "Secret menu").is_some());
