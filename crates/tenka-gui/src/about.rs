@@ -167,10 +167,11 @@ impl About {
             let spacing = ui.spacing().item_spacing;
             let project_left = table_left + details;
             let row_height = ui.text_style_height(&egui::TextStyle::Body);
+            let line_height = ui.spacing().interact_size.y.max(row_height) + spacing.y;
             let project_top = area.top() + (logo.anchor.y - 1.5 * row_height - spacing.y).max(0.0);
             let project_area =
                 egui::Rect::from_min_max(egui::pos2(project_left, project_top), area.max);
-            let (check_for_updates, license_y) = ui
+            let (check_for_updates, license_y, table_top) = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(project_area), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(catalog.text(154));
@@ -186,8 +187,9 @@ impl About {
                         ui.add_enabled(!checking, egui::Button::new(catalog.text(157)))
                             .clicked()
                     });
+                    let table_top = ui.next_widget_position().y + 2.0 * line_height;
                     show_update_status(ui, catalog, checking, self.status.as_ref());
-                    (check.inner, license.response.rect.center().y)
+                    (check.inner, license.response.rect.center().y, table_top)
                 })
                 .inner;
             let title_rect = egui::Rect::from_min_size(
@@ -207,8 +209,9 @@ impl About {
                         .sense(egui::Sense::click()),
                 )
                 .clicked();
-            ui.add_space(18.0);
+            ui.add_space((table_top - ui.next_widget_position().y).max(0.0));
             let measured = show_components(ui, catalog, inset);
+            ui.add_space(line_height);
             (check_for_updates, logo_clicked, measured)
         });
         let (check_for_updates, logo_clicked, measured) = response.inner;
@@ -248,7 +251,12 @@ fn show_update_status(
             ui.weak(catalog.text(162));
         }
         Some(Ok(ReleaseStatus::Current)) => {
-            ui.label(catalog.text(163));
+            let color = if ui.visuals().dark_mode {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                egui::Color32::DARK_GREEN
+            };
+            ui.colored_label(color, catalog.text(163));
         }
         Some(Ok(ReleaseStatus::Available(tag))) => {
             ui.label(format!("{} · {tag}", catalog.text(164)));
@@ -350,14 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn the_logo_and_project_details_align_with_the_centered_table() {
+    fn the_about_header_aligns_with_the_table_and_leaves_room_for_status() {
         let context = Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, crate::MAIN_WINDOW_SIZE);
         let catalog = Catalog::new("en");
         let mut window = WindowSize::new();
         let mut about = About::default();
         about.open();
-        let mut render = || {
+        let mut render = |about: &mut About| {
             crate::tests::render_ui(
                 &context,
                 egui::RawInput {
@@ -368,9 +376,9 @@ mod tests {
             )
         };
         for _ in 0..3 {
-            render();
+            render(&mut about);
         }
-        let output = render();
+        let output = render(&mut about);
         let stripe = output
             .shapes
             .iter()
@@ -417,6 +425,37 @@ mod tests {
             let label_rect = text_rect(label);
             assert!(label_rect.left() > title.right());
             assert!((label_rect.left() - text_rect(catalog.text(168)).left()).abs() <= 1.0);
+        }
+        let table_top = text_rect(catalog.text(166)).top();
+        let version_bottom = text_rect(catalog.text(156)).bottom();
+        about.status = Some(Ok(ReleaseStatus::Current));
+        for (theme, color) in [
+            (egui::Theme::Dark, egui::Color32::LIGHT_GREEN),
+            (egui::Theme::Light, egui::Color32::DARK_GREEN),
+        ] {
+            context.set_theme(theme);
+            let checked = render(&mut about);
+            let text = |label| {
+                checked.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text),
+                    _ => None,
+                })
+            };
+            let status = text(catalog.text(163)).unwrap();
+            assert_eq!(status.galley.job.sections[0].format.color, color);
+            let style = context.style_of(theme);
+            let spacing = style.spacing.item_spacing.y;
+            let row_height = style.spacing.interact_size.y;
+            let line_height = row_height + spacing;
+            let header = text(catalog.text(166)).unwrap();
+            let header_inset = (row_height - header.galley.rect.height()).max(0.0) * 0.5;
+            assert!((status.pos.y - version_bottom - spacing).abs() <= 1.0);
+            assert!((header.pos.y - table_top).abs() <= 1.0);
+            let gap = table_top - header_inset - status.pos.y;
+            assert!(
+                (gap - 2.0 * line_height).abs() <= 1.0,
+                "gap: {gap}, line height: {line_height}"
+            );
         }
     }
 }
