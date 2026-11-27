@@ -24,6 +24,7 @@ const MIN_COLUMN_WIDTH: f32 = 120.0;
 struct TableLayout {
     width: f32,
     upstream: f32,
+    details: f32,
 }
 
 struct Logo {
@@ -146,7 +147,17 @@ impl About {
                 0.0
             };
             let table_left = area.left() + inset;
-            let upstream = layout.upstream.max(MIN_COLUMN_WIDTH + COLUMN_SPACING);
+            let column_stride = MIN_COLUMN_WIDTH + COLUMN_SPACING;
+            let upstream = if layout.upstream > 0.0 {
+                layout.upstream
+            } else {
+                column_stride
+            };
+            let details = if layout.details > 0.0 {
+                layout.details
+            } else {
+                2.0 * column_stride
+            };
             let title_left = table_left + upstream;
             let mut title_font = egui::TextStyle::Heading.resolve(ui.style());
             title_font.size *= 2.0;
@@ -154,8 +165,7 @@ impl About {
                 ui.painter()
                     .layout_no_wrap("Tenka".into(), title_font, ui.visuals().text_color());
             let spacing = ui.spacing().item_spacing;
-            let project_left =
-                (area.center().x + spacing.x * 0.5).max(title_left + title.size().x + spacing.x);
+            let project_left = table_left + details;
             let row_height = ui.text_style_height(&egui::TextStyle::Body);
             let project_top = area.top() + (logo.anchor.y - 1.5 * row_height - spacing.y).max(0.0);
             let project_area =
@@ -185,9 +195,8 @@ impl About {
                 title.size(),
             );
             ui.put(title_rect, egui::Label::new(title));
-            // The striped rows extend two points beyond the first column.
             let logo_rect = egui::Rect::from_min_size(
-                egui::pos2(table_left - 2.0, license_y) - logo.anchor,
+                egui::pos2(table_left, license_y) - logo.anchor,
                 LOGO_SIZE,
             );
             let logo_clicked = ui
@@ -205,6 +214,7 @@ impl About {
         let (check_for_updates, logo_clicked, measured) = response.inner;
         if (layout.width - measured.width).abs() > 0.5
             || (layout.upstream - measured.upstream).abs() > 0.5
+            || (layout.details - measured.details).abs() > 0.5
         {
             self.table_layout = measured;
             context.request_repaint();
@@ -300,7 +310,7 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
             .show(ui, |ui| {
                 let first = ui.strong(catalog.text(166));
                 let upstream = ui.strong(catalog.text(167));
-                ui.strong(catalog.text(168));
+                let details = ui.strong(catalog.text(168));
                 ui.end_row();
                 for component in components() {
                     ui.label(component.name);
@@ -308,12 +318,16 @@ fn show_components(ui: &mut Ui, catalog: &Catalog, inset: f32) -> TableLayout {
                     ui.label(catalog.translate(component.details));
                     ui.end_row();
                 }
-                upstream.rect.left() - first.rect.left()
+                (
+                    upstream.rect.left() - first.rect.left(),
+                    details.rect.left() - first.rect.left(),
+                )
             })
     });
     TableLayout {
         width: grid.inner.response.rect.width(),
-        upstream: grid.inner.inner,
+        upstream: grid.inner.inner.0,
+        details: grid.inner.inner.1,
     }
 }
 
@@ -394,15 +408,15 @@ mod tests {
                 .unwrap()
         };
         let logo_anchor = logo.min + about.logo.as_ref().unwrap().anchor;
-        assert!((logo_anchor.x - stripe.left()).abs() <= 1.0);
+        assert!((logo_anchor.x - text_rect(catalog.text(166)).left()).abs() <= 1.0);
         let title = text_rect("Tenka");
-        assert!((title.left() - text_rect("Upstream").left()).abs() <= 1.0);
+        assert!((title.left() - text_rect(catalog.text(167)).left()).abs() <= 1.0);
         let license = text_rect("License");
         assert!((license.center().y - logo_anchor.y).abs() <= 1.0);
         for label in ["Repository", "License", "Version"] {
             let label_rect = text_rect(label);
             assert!(label_rect.left() > title.right());
-            assert!((label_rect.left() - license.left()).abs() <= 1.0);
+            assert!((label_rect.left() - text_rect(catalog.text(168)).left()).abs() <= 1.0);
         }
     }
 }
