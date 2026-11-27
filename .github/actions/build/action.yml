@@ -25,10 +25,10 @@ runs:
         path: |
           ~/.cargo/registry
           target
-        key: tenka-dev-ubuntu-2204-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-${{ github.sha }}
+        key: tenka-dev-ubuntu-2404-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-${{ github.sha }}
         restore-keys: |
-          tenka-dev-ubuntu-2204-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-
-          tenka-dev-ubuntu-2204-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-
+          tenka-dev-ubuntu-2404-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-${{ hashFiles('Cargo.lock', '.github/workflows/dev.yml') }}-
+          tenka-dev-ubuntu-2404-${{ runner.arch }}-${{ steps.toolchain.outputs.version }}-
     - name: Verify workspace
       shell: bash
       run: |
@@ -59,7 +59,7 @@ runs:
           export WAYLAND_DISPLAY=wayland-tenka
           export LIBGL_ALWAYS_SOFTWARE=1
           unset WAYLAND_SOCKET
-          weston --backend=x11-backend.so --socket="$WAYLAND_DISPLAY" --no-config --idle-time=0 \
+          weston --backend=x11 --socket="$WAYLAND_DISPLAY" --no-config --idle-time=0 \
             --width=1024 --height=768 --log="$XDG_RUNTIME_DIR/weston.log" &
           compositor=$!
           app=

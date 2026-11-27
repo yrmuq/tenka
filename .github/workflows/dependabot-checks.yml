@@ -21,7 +21,7 @@ permissions: {}
 jobs:
   check:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
   merge:
     needs: check
     if: github.ref == 'refs/heads/main' && needs.check.result == 'success'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     concurrency:
       group: tenka-publication
       cancel-in-progress: false
