@@ -622,18 +622,10 @@ impl Tenka {
             ui.place(title_area, title);
             ui.add_space(6.0);
             self.show_completion_totals(ui, summary, id.with("table_width"));
-            let mut open_errors = false;
-            if summary.errors > 0 || summary.skipped > 0 {
-                ui.horizontal(|ui| {
-                    if summary.errors > 0 {
-                        let label = format!("{} · {}", self.label(124), summary.errors);
-                        open_errors = ui.button(label).clicked();
-                    }
-                    if summary.skipped > 0 {
-                        ui.weak(format!("{} · {}", self.label(141), summary.skipped));
-                    }
-                });
-            }
+            let open_errors = summary.errors > 0
+                && ui
+                    .button(format!("{} · {}", self.label(124), summary.errors))
+                    .clicked();
             let open_folder = summary.folder().is_some_and(|_| {
                 let footer = ui.available_rect_before_wrap();
                 ui.add_space(footer_gap);
@@ -666,7 +658,7 @@ impl Tenka {
             SPACING.x * 0.5
         };
         let item_gap = ui.spacing().item_spacing.x;
-        let mut row_dividers = Vec::with_capacity(3);
+        let mut row_dividers = Vec::with_capacity(4);
         let grid = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -713,6 +705,12 @@ impl Tenka {
                         ui.label(self.label(140));
                         ui.label(self.catalog.elapsed(summary.elapsed.as_secs()));
                         ui.end_row();
+                        if summary.skipped > 0 {
+                            row_dividers.push(ui.cursor().top() - SPACING.y * 0.5);
+                            ui.label(self.label(141));
+                            ui.label(summary.skipped.to_string());
+                            ui.end_row();
+                        }
                         let bottom = ui.cursor().top() - SPACING.y * 0.5;
                         (files.response.rect.left(), top..=bottom)
                     })
@@ -1990,7 +1988,7 @@ mod tests {
             "1.0 KB",
             "1.0 KB (50%)",
             "1 min 5 s",
-            "Skipped · 1",
+            "Skipped",
         ] {
             assert!(text_position(&modal, label).is_some(), "{label}");
         }
@@ -2014,7 +2012,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!((table.center().x - center).abs() < 2.0);
+        assert!((table.center().x - center).abs() < 2.0, "{table:?}");
         assert!(modal.shapes.iter().any(|shape| {
             matches!(shape.shape, Shape::LineSegment { points: [a, b], .. }
                 if a.x == b.x && (a.y - table.top()).abs() < 1.0
@@ -2048,7 +2046,9 @@ mod tests {
         let frame = ctx
             .memory(|memory| memory.area_rect(egui::Id::unique("conversion_summary")))
             .unwrap();
-        assert!(((button.top() - divider) - (frame.bottom() - button.bottom())).abs() < 2.0);
+        let gap_above = button.top() - divider;
+        let gap_below = frame.bottom() - button.bottom();
+        assert!((gap_above - gap_below).abs() < 2.0, "{gap_above} vs {gap_below}");
         let arrow_shafts = modal
             .shapes
             .iter()
