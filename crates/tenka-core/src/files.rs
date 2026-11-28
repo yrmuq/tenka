@@ -1,5 +1,12 @@
 //! Convert files into a caller-selected directory using the desktop conversion policy.
 
+mod folders;
+
+pub use folders::{
+    FolderError, FolderProgress, FolderReport, FolderScan, IMAGE_EXTENSIONS, ImageResult,
+    ScanError, SubfolderError, convert_folder, create_output_subfolder, scan_folder,
+};
+
 use std::{
     ffi::OsString,
     fs::{self, File, Metadata},
@@ -123,6 +130,20 @@ pub fn convert_file(
     source_policy: SourcePolicy,
     cancelled: &AtomicBool,
 ) -> Result<FileConversion, FileError> {
+    convert_file_to(source, options, mode, source_policy, cancelled, || {
+        fs::create_dir_all(destination).map_err(FileError::Destination)?;
+        Ok(destination.to_owned())
+    })
+}
+
+fn convert_file_to(
+    source: &Path,
+    options: Options,
+    mode: OptimizationMode,
+    source_policy: SourcePolicy,
+    cancelled: &AtomicBool,
+    prepare_destination: impl FnOnce() -> Result<PathBuf, FileError>,
+) -> Result<FileConversion, FileError> {
     check_cancelled(Some(cancelled))?;
     let file = open_image(source).map_err(FileError::Read)?;
     let delete = source_policy == SourcePolicy::DeleteAfterSave;
@@ -134,10 +155,10 @@ pub fn convert_file(
     let (source_dimensions, output) = optimize_for_conversion(&input, options, mode, cancelled)?;
     check_cancelled(Some(cancelled))?;
     let output = if let Some(output) = output {
-        fs::create_dir_all(destination).map_err(FileError::Destination)?;
+        let destination = prepare_destination()?;
         let path = save_bytes(
             source,
-            destination,
+            &destination,
             output.setting.format(),
             &output.bytes,
             delete,
@@ -145,7 +166,7 @@ pub fn convert_file(
         let source_status = match original {
             None => SourceStatus::Kept,
             Some(_) if cancelled.load(Ordering::Relaxed) => SourceStatus::KeptAfterCancellation,
-            Some(original) => match remove_source(source, &original, destination, cancelled) {
+            Some(original) => match remove_source(source, &original, &destination, cancelled) {
                 Ok(status) => status,
                 Err(error) => SourceStatus::DeletionFailed(error),
             },

@@ -89,6 +89,18 @@ Download the x86_64 `.AppImage` from the [stable download page](https://github.c
 
 Flatpak packaging is planned.
 
+### Command-line conversion
+
+```sh
+./Tenka-x86_64.AppImage convert ./Photos --output ./Converted --format jxl --mode balance > report.json 2> progress.jsonl
+```
+
+Pass a file or a folder. A folder is scanned recursively for JPEG, PNG, and WebP. Its relative paths are preserved, so `Photos/2024/image.png` becomes `Converted/2024/image.jxl`. The defaults are `--format jxl --mode best`. Use `--delete-source` to delete each original after its output is saved.
+
+Standard output contains one JSON report with counts, input and output sizes for saved images, and each file's result or error. Standard error carries newline-delimited JSON progress events. Exit codes are `0` for completion, `1` when any operation failed, `2` for invalid arguments, and `130` for cancellation. Ctrl+C returns the results already recorded.
+
+Rust integrations can call [`tenka_core::files::convert_folder`](crates/tenka-core/src/files/folders.rs) with a progress callback or [`convert_file`](crates/tenka-core/src/files.rs) for a single image.
+
 ---
 
 ## License & Attribution

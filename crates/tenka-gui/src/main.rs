@@ -1,4 +1,5 @@
 mod about;
+mod cli;
 mod comparison;
 mod estimate;
 mod file_drop;
@@ -51,13 +52,23 @@ fn app_title(uppercase: bool) -> &'static str {
 }
 
 fn main() -> eframe::Result {
+    let mut args = std::env::args_os().skip(1);
+    let command = args.next();
+    match command.as_deref().and_then(OsStr::to_str) {
+        Some("convert") => std::process::exit(cli::run(args)),
+        Some("--help" | "-h") => {
+            cli::print_help();
+            return Ok(());
+        }
+        _ => {}
+    }
+
     #[cfg(target_os = "linux")]
     window_icon::register_appimage_icon();
 
     let icon =
         eframe::icon_data::from_png_bytes(APP_ICON).expect("the embedded Tenka icon is valid PNG");
-    let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(OsStr::new("--compare")) {
+    if command.as_deref() == Some(OsStr::new("--compare")) {
         let language = args
             .next()
             .and_then(|value| value.into_string().ok())

@@ -40,6 +40,22 @@ runs:
       run: |
         cargo build --release --locked -p tenka
         TENKA_CHANNEL="${{ inputs.channel }}" ./packaging/build-appimage.sh
+    - name: Convert a folder with no display session
+      shell: bash
+      run: |
+        set -euo pipefail
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        mkdir -p "$work/input/album"
+        cp assets/io.github.yrmuq.tenka.png "$work/input/album/image.png"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./dist/Tenka-x86_64.AppImage \
+          --appimage-extract-and-run convert "$work/input" --output "$work/output" \
+          --format jxl --mode balance > "$work/report.json" 2> "$work/progress.jsonl"
+        jq -e '.status == "completed" and .converted == 1 and .files[0].source_status == "kept"' \
+          "$work/report.json"
+        jq -s -e 'last | .event == "finished_file" and .completed == 1' "$work/progress.jsonl"
+        test -s "$work/output/album/image.jxl"
+        test -s "$work/input/album/image.png"
     - name: Open the AppImage on X11 with its bundled keyboard libraries
       shell: bash
       run: |
