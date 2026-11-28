@@ -1,7 +1,6 @@
 use std::{
-    ffi::OsString,
     fs::{self, File},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufReader},
     ops::ControlFlow::{self, Break, Continue},
     path::{Component, Path, PathBuf},
     sync::{
@@ -13,7 +12,10 @@ use std::{
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
-use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source};
+use tenka_core::{
+    MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source,
+    files::{SaveError, read_image_file, save_output_bytes},
+};
 
 use crate::estimate::{InputSize, Timing};
 
@@ -467,20 +469,7 @@ fn create_output_subfolder(root: &Path, relative: &Path) -> Result<PathBuf, Fail
 }
 
 pub(crate) fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
-    let result = (|| {
-        if !fs::metadata(path)?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Expected a regular file",
-            ));
-        }
-        let mut bytes = Vec::new();
-        File::open(path)?
-            .take(MAX_INPUT_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
-    })();
-    result.map_err(|error: io::Error| Failure {
+    read_image_file(path).map_err(|error| Failure {
         label: 59,
         detail: error.to_string(),
     })
@@ -496,33 +485,15 @@ fn save_image(
         .or_else(|| source.parent())
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let stem = source.file_stem().ok_or(Failure {
-        label: 95,
-        detail: source.display().to_string(),
-    })?;
-    let failed = |label, error: io::Error| Failure {
-        label,
-        detail: error.to_string(),
-    };
-    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(|error| failed(96, error))?;
-    temp.write_all(bytes).map_err(|error| failed(97, error))?;
-    for i in 0..1000 {
-        let mut name = OsString::from(stem);
-        if i > 0 {
-            name.push(format!("-{i}"));
-        }
-        name.push(".");
-        name.push(format.extension());
-        let path = folder.join(name);
-        match temp.persist_noclobber(&path) {
-            Ok(_) => return Ok(path),
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => temp = error.file,
-            Err(error) => return Err(failed(60, error.error)),
-        }
-    }
-    Err(Failure {
-        label: 98,
-        detail: folder.display().to_string(),
+    save_output_bytes(source, folder, format, bytes).map_err(|error| {
+        let (label, detail) = match error {
+            SaveError::MissingFileStem => (95, source.display().to_string()),
+            SaveError::Create(error) => (96, error.to_string()),
+            SaveError::Write(error) => (97, error.to_string()),
+            SaveError::Publish(error) => (60, error.to_string()),
+            SaveError::NameExhausted(folder) => (98, folder.display().to_string()),
+        };
+        Failure { label, detail }
     })
 }
 

@@ -1,6 +1,7 @@
 # Repository map
 
 - `crates/tenka-core/src/lib.rs` exposes automatic conversion policy, image inspection, and the JPEG XL/WebP codec and measurement API.
+- `crates/tenka-core/src/files.rs` converts paths into a chosen output folder and shares bounded reads and collision-safe saving with the desktop app.
 - `crates/tenka-core/src/raster.rs` handles input validation, color and orientation normalization, resizing, and reference-scale SSIMULACRA2 scoring.
 - `crates/tenka-core/src/jxl_header.rs` validates JPEG XL dimensions, bit depth, and animation before decoding files for comparison.
 - `crates/tenka-gui/src/main.rs` implements the conversion window and routes batch work through a background worker.

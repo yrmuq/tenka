@@ -6,7 +6,8 @@
 
 - Keep the user's chosen output format throughout automatic conversion.
 - Keep input dimensions in the desktop conversion window while automatic resolution reduction is hidden.
-- Keep original files and existing output files intact when saving conversions.
+- Keep original files in the desktop app and delete them through the file conversion API only when explicitly requested and after successfully saving the output.
+- Keep existing output files intact to avoid overwriting earlier conversions.
 - Limit saved outputs to the selected format's full-resolution lossless size.
 - Use reversible transcoding alone for large JPEG-to-JPEG XL jobs in Best mode, and keep it as the lossless fallback when Balance or Cheap tests lossy encodes.
 - If desktop conversion finds no smaller JPEG XL, save the smallest tested JPEG XL that meets the selected mode's quality checks and flag any size increase.
