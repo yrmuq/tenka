@@ -1,5 +1,6 @@
-//! Still-image conversion and codec measurements without filesystem or GUI dependencies.
+//! Still-image conversion and codec measurements without GUI dependencies.
 
+pub mod files;
 mod jxl_header;
 mod raster;
 

@@ -1,9 +1,8 @@
 use std::{
-    ffi::OsString,
     fs::{self, File},
-    io::{self, BufReader, Read, Write},
+    io::BufReader,
     ops::ControlFlow::{self, Break, Continue},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
@@ -13,11 +12,17 @@ use std::{
 };
 
 use eframe::egui::{Color32, ColorImage, Context, Rect, pos2};
-use tenka_core::{MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source};
+use tenka_core::{
+    MAX_INPUT_BYTES, OptimizationMode, Options, OutputFormat, Source,
+    files::{
+        SaveError, SubfolderError, create_output_subfolder, read_image_file, save_output_bytes,
+        scan_folder,
+    },
+};
 
 use crate::estimate::{InputSize, Timing};
 
-pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+pub use tenka_core::files::IMAGE_EXTENSIONS;
 
 #[derive(Clone)]
 pub struct InputFile {
@@ -75,32 +80,45 @@ pub struct Failure {
 
 impl From<tenka_core::Error> for Failure {
     fn from(error: tenka_core::Error) -> Self {
-        use tenka_core::Error::*;
-        let label = match error {
-            Cancelled => 131,
-            Format => 48,
-            Animation => 49,
-            BitDepth => 50,
-            Limits => 51,
-            Color => 52,
-            Options => 53,
-            Decode(_) => 54,
-            JxlEncode(_) => 55,
-            JxlTranscode(_) => 132,
-            JxlDecode(_) => 56,
-            WebpEncode => 57,
-            Measurement => 58,
-            WebpConfig => 77,
-            WebpCandidateDecode(_) => 78,
-            JxlPixels => 79,
-            QualitySample => 80,
-            CandidateDimensions => 81,
-            QualityRange(_) => 86,
-        };
         Self {
-            label,
+            label: codec_error_label(&error),
             detail: std::error::Error::source(&error).map_or_else(String::new, ToString::to_string),
         }
+    }
+}
+
+pub(crate) fn codec_error_label(error: &tenka_core::Error) -> u16 {
+    use tenka_core::Error::*;
+    match error {
+        Cancelled => 131,
+        Format => 48,
+        Animation => 49,
+        BitDepth => 50,
+        Limits => 51,
+        Color => 52,
+        Options => 53,
+        Decode(_) => 54,
+        JxlEncode(_) => 55,
+        JxlTranscode(_) => 132,
+        JxlDecode(_) => 56,
+        WebpEncode => 57,
+        Measurement => 58,
+        WebpConfig => 77,
+        WebpCandidateDecode(_) => 78,
+        JxlPixels => 79,
+        QualitySample => 80,
+        CandidateDimensions => 81,
+        QualityRange(_) => 86,
+    }
+}
+
+impl From<SubfolderError> for Failure {
+    fn from(error: SubfolderError) -> Self {
+        let (label, detail) = match error {
+            SubfolderError::InvalidRelativePath(path) => (146, path.display().to_string()),
+            SubfolderError::Create { path, error } => (147, format!("{}\n{error}", path.display())),
+        };
+        Self { label, detail }
     }
 }
 
@@ -155,58 +173,26 @@ fn scan_inputs(paths: Vec<PathBuf>) -> ScannedInputs {
             files.push(InputFile::from(path));
             continue;
         }
-        let start = files.len();
-        let root_name = path.file_name().map(PathBuf::from).unwrap_or_default();
-        let mut folders = vec![(path, root_name)];
-        while let Some((folder, relative_folder)) = folders.pop() {
-            let entries = match fs::read_dir(&folder) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    errors.push(format!("{}: {error}", folder.display()));
-                    continue;
-                }
-            };
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        errors.push(format!("{}: {error}", folder.display()));
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                match entry.file_type() {
-                    Ok(kind) if kind.is_dir() => {
-                        folders.push((path, relative_folder.join(entry.file_name())));
-                    }
-                    Ok(kind) if kind.is_file() && is_supported_image(&path) => {
-                        files.push(InputFile {
-                            path,
-                            relative_folder: relative_folder.clone(),
-                        });
-                    }
-                    Ok(_) => {}
-                    Err(error) => errors.push(format!("{}: {error}", path.display())),
-                }
+        let root_name = path.file_name().map(Path::new).unwrap_or(Path::new(""));
+        let scan = scan_folder(&path);
+        errors.extend(scan.errors.into_iter().map(|error| error.to_string()));
+        files.extend(scan.files.into_iter().map(|file| {
+            let subfolder = file
+                .strip_prefix(&path)
+                .expect("scanned file is within the input root")
+                .parent()
+                .expect("scanned file has a parent");
+            InputFile {
+                relative_folder: root_name.join(subfolder),
+                path: file,
             }
-        }
-        files[start..].sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        }));
     }
     let failure = (!errors.is_empty()).then(|| Failure {
         label: 145,
         detail: errors.join("\n"),
     });
     ScannedInputs { files, failure }
-}
-
-fn is_supported_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            IMAGE_EXTENSIONS
-                .iter()
-                .any(|supported| ext.eq_ignore_ascii_case(supported))
-        })
 }
 
 pub fn probe_inputs() -> Sender<Vec<InputProbe>> {
@@ -440,47 +426,8 @@ fn convert_one(
     }))
 }
 
-fn create_output_subfolder(root: &Path, relative: &Path) -> Result<PathBuf, Failure> {
-    let mut folder = root.to_owned();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Err(Failure {
-                label: 146,
-                detail: relative.display().to_string(),
-            });
-        };
-        folder.push(name);
-        match fs::create_dir(&folder) {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == io::ErrorKind::AlreadyExists
-                    && fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) => {}
-            Err(error) => {
-                return Err(Failure {
-                    label: 147,
-                    detail: format!("{}\n{error}", folder.display()),
-                });
-            }
-        }
-    }
-    Ok(folder)
-}
-
 pub(crate) fn read_image(path: &Path) -> Result<Vec<u8>, Failure> {
-    let result = (|| {
-        if !fs::metadata(path)?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Expected a regular file",
-            ));
-        }
-        let mut bytes = Vec::new();
-        File::open(path)?
-            .take(MAX_INPUT_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
-    })();
-    result.map_err(|error: io::Error| Failure {
+    read_image_file(path).map_err(|error| Failure {
         label: 59,
         detail: error.to_string(),
     })
@@ -496,33 +443,15 @@ fn save_image(
         .or_else(|| source.parent())
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let stem = source.file_stem().ok_or(Failure {
-        label: 95,
-        detail: source.display().to_string(),
-    })?;
-    let failed = |label, error: io::Error| Failure {
-        label,
-        detail: error.to_string(),
-    };
-    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(|error| failed(96, error))?;
-    temp.write_all(bytes).map_err(|error| failed(97, error))?;
-    for i in 0..1000 {
-        let mut name = OsString::from(stem);
-        if i > 0 {
-            name.push(format!("-{i}"));
-        }
-        name.push(".");
-        name.push(format.extension());
-        let path = folder.join(name);
-        match temp.persist_noclobber(&path) {
-            Ok(_) => return Ok(path),
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => temp = error.file,
-            Err(error) => return Err(failed(60, error.error)),
-        }
-    }
-    Err(Failure {
-        label: 98,
-        detail: folder.display().to_string(),
+    save_output_bytes(source, folder, format, bytes).map_err(|error| {
+        let (label, detail) = match error {
+            SaveError::MissingFileStem => (95, source.display().to_string()),
+            SaveError::Create(error) => (96, error.to_string()),
+            SaveError::Write(error) => (97, error.to_string()),
+            SaveError::Publish(error) => (60, error.to_string()),
+            SaveError::NameExhausted(folder) => (98, folder.display().to_string()),
+        };
+        Failure { label, detail }
     })
 }
 
